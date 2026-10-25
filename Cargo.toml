@@ -1,0 +1,15 @@
+[package]
+name = "mekhanik"
+version = "0.2.0"
+edition = "2021"
+description = "Механик — сам находит, почему тормозит ПК Артура, и сам чинит; отдельно от БАРСа, но знает его, и БАРС знает его (Р-193, Р-194)"
+authors = ["akoti02"]
+
+[dependencies]
+serde_json = "1"
+chrono = "0.4"
+
+[profile.release]
+opt-level = 2
+debug = false
+strip = true
