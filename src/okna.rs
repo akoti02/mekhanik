@@ -28,6 +28,8 @@ extern "system" {
     fn ProcessIdToSessionId(pid: u32, сеанс: *mut u32) -> i32;
     fn K32EmptyWorkingSet(h: isize) -> i32;
     fn GetProcessTimes(h: isize, создан: *mut u64, конец: *mut u64, ядро: *mut u64, польз: *mut u64) -> i32;
+    fn GetProcessInformation(h: isize, класс: u32, данные: *mut c_void, размер: u32) -> i32;
+    fn SetProcessInformation(h: isize, класс: u32, данные: *const c_void, размер: u32) -> i32;
 }
 
 #[link(name = "user32")]
@@ -446,6 +448,27 @@ pub fn очередь_диска(pid: u32, класс: Option<u32>) -> Option<(u
     итог
 }
 
+/// 🟥 26.10: приоритет памяти процесса (ProcessMemoryPriority: 1 — очень низкий … 5 — обычный): его страницы в списке
+/// ожидания Windows отдаёт другим первыми, и чтение огромных файлов не выталкивает из памяти экран и его программы.
+/// (был, стал); `уровень` None — только прочесть. `None` — не открыть или отказ.
+pub fn память_процесса(pid: u32, уровень: Option<u32>) -> Option<(u32, u32)> {
+    // PROCESS_QUERY_INFORMATION | PROCESS_SET_INFORMATION
+    let h = unsafe { OpenProcess(0x0400 | 0x0200, 0, pid) };
+    if h == 0 { return None; }
+    let mut был: u32 = 0;
+    let mut итог = None;
+    // ProcessMemoryPriority = 0, MEMORY_PRIORITY_INFORMATION — одно ULONG
+    if unsafe { GetProcessInformation(h, 0, &mut был as *mut u32 as *mut c_void, 4) } != 0 {
+        итог = match уровень {
+            None => Some((был, был)),
+            Some(у) if у == был => Some((был, был)),
+            Some(у) => (unsafe { SetProcessInformation(h, 0, &у as *const u32 as *const c_void, 4) } != 0).then_some((был, у)),
+        };
+    }
+    unsafe { CloseHandle(h) };
+    итог
+}
+
 /// Приоритет процессора — только прочесть.
 pub fn приоритет_сейчас(pid: u32) -> Option<u32> {
     let h = unsafe { OpenProcess(0x1000, 0, pid) };
@@ -560,6 +583,10 @@ mod тесты {
         let (д0, _) = очередь_диска(я, None).expect("очередь диска");
         assert_eq!(очередь_диска(я, Some(0)).map(|(_, с)| с), Some(0));
         assert_eq!(очередь_диска(я, Some(д0)).map(|(_, с)| с), Some(д0));
+        let (п0, _) = память_процесса(я, None).expect("приоритет памяти");
+        assert_eq!(память_процесса(я, Some(1)).map(|(_, с)| с), Some(1));
+        assert_eq!(память_процесса(я, None).map(|(б, _)| б), Some(1), "Windows приняла «очень низкий»");
+        assert_eq!(память_процесса(я, Some(п0)).map(|(_, с)| с), Some(п0));
         let mut буф = vec![0u8; 2 << 20];
         let до = снимок(&mut буф).and_then(|с| с.get(&я).map(|п| п.рабочий)).unwrap_or(0);
         assert!(выжать(я));
