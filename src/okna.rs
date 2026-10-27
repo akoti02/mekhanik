@@ -30,6 +30,14 @@ extern "system" {
     fn GetProcessTimes(h: isize, создан: *mut u64, конец: *mut u64, ядро: *mut u64, польз: *mut u64) -> i32;
     fn GetProcessInformation(h: isize, класс: u32, данные: *mut c_void, размер: u32) -> i32;
     fn SetProcessInformation(h: isize, класс: u32, данные: *const c_void, размер: u32) -> i32;
+    fn QueryUnbiasedInterruptTime(время: *mut u64) -> i32;
+}
+
+/// 🟥 27.10: время без сна ПК, мс (QueryUnbiasedInterruptTime — сон и спячка в него не входят). Часы шага ушли на
+/// минуты, а это время — нет: ПК спал, это не тормоз (27.10 20:01–22:13 сон сочли тормозом в 7 927 с).
+pub fn без_сна_мс() -> Option<u64> {
+    let mut в = 0u64;
+    (unsafe { QueryUnbiasedInterruptTime(&mut в) } != 0).then_some(в / 10_000)
 }
 
 #[link(name = "user32")]
@@ -116,6 +124,32 @@ impl Видеокарта {
         let hr = unsafe { метод::<СоздатьЗапрос>(у, 24)(у, &описание, &mut в.запрос) };
         if hr < 0 || в.запрос.is_null() { return Err(format!("CreateQuery {hr:#x}")); }
         Ok(в)
+    }
+    /// 🟥 27.10: адаптер, на котором меряем (тот, что рисует экран), — именем, как в счётчиках видеокарты
+    /// (`luid_0x00000000_0x00010f5c`). Экран рисует Intel Arc, а счёт по процессам складывал Intel и NVIDIA: виновника
+    /// задержки экрана искали не на той видеокарте.
+    pub fn адаптер(&self) -> Option<String> {
+        type Спросить = unsafe extern "system" fn(*mut c_void, *const [u8; 16], *mut *mut c_void) -> i32;
+        type ВзятьАдаптер = unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> i32;
+        type Описание = unsafe extern "system" fn(*mut c_void, *mut [u8; 304]) -> i32;
+        // IID_IDXGIDevice {54ec77fa-1377-44e6-8c32-88fd5f44c84c}
+        let iid: [u8; 16] = [0xfa, 0x77, 0xec, 0x54, 0x77, 0x13, 0xe6, 0x44, 0x8c, 0x32, 0x88, 0xfd, 0x5f, 0x44, 0xc8, 0x4c];
+        let (mut дхги, mut адаптер) = (std::ptr::null_mut(), std::ptr::null_mut());
+        unsafe {
+            if метод::<Спросить>(self.устройство, 0)(self.устройство, &iid, &mut дхги) < 0 || дхги.is_null() { return None; }
+            // IDXGIDevice::GetAdapter — 7
+            let hr = метод::<ВзятьАдаптер>(дхги, 7)(дхги, &mut адаптер);
+            метод::<Отпустить>(дхги, 2)(дхги);
+            if hr < 0 || адаптер.is_null() { return None; }
+            // IDXGIAdapter::GetDesc — 8; DXGI_ADAPTER_DESC: AdapterLuid — с 296-го байта (LowPart, HighPart)
+            let mut оп = [0u8; 304];
+            let hr = метод::<Описание>(адаптер, 8)(адаптер, &mut оп);
+            метод::<Отпустить>(адаптер, 2)(адаптер);
+            if hr < 0 { return None; }
+            let низ = u32::from_le_bytes([оп[296], оп[297], оп[298], оп[299]]);
+            let верх = u32::from_le_bytes([оп[300], оп[301], оп[302], оп[303]]);
+            Some(format!("luid_0x{верх:08x}_0x{низ:08x}"))
+        }
     }
     /// Сколько ждала крошечная работа на видеокарте, мс (не дольше `предел`); `Err` — устройство потеряно.
     pub fn ожидание(&self, предел: Duration, сон: &Сон) -> Result<f64, String> {
@@ -469,6 +503,20 @@ pub fn память_процесса(pid: u32, уровень: Option<u32>) -> O
     итог
 }
 
+/// Полный путь программы процесса. `None` — не открыть.
+pub fn путь_процесса(pid: u32) -> Option<String> {
+    #[link(name = "kernel32")]
+    extern "system" { fn QueryFullProcessImageNameW(h: isize, флаги: u32, имя: *mut u16, длина: *mut u32) -> i32; }
+    // PROCESS_QUERY_LIMITED_INFORMATION
+    let h = unsafe { OpenProcess(0x1000, 0, pid) };
+    if h == 0 { return None; }
+    let mut буф = [0u16; 1024];
+    let mut длина = буф.len() as u32;
+    let ок = unsafe { QueryFullProcessImageNameW(h, 0, буф.as_mut_ptr(), &mut длина) } != 0;
+    unsafe { CloseHandle(h) };
+    ок.then(|| String::from_utf16_lossy(&буф[..длина as usize]))
+}
+
 /// Приоритет процессора — только прочесть.
 pub fn приоритет_сейчас(pid: u32) -> Option<u32> {
     let h = unsafe { OpenProcess(0x1000, 0, pid) };
@@ -503,9 +551,19 @@ pub fn экземпляр(имя: &str) -> Option<(u32, &str)> {
 /// Доля видеокарты по процессам за время с прошлого сбора, %: счёт (3D и вычисления) и декодер видео — отдельно.
 pub struct ВидеокартаПроцессов { запрос: Ручка, счётчик: Ручка }
 
-/// Доли видеокарты по процессам.
+/// Доли видеокарты по процессам. `экран` — 🟥 27.10: вся работа процесса (любые движки) на адаптере экрана: с ней спорит
+/// работа экрана; 3D и вычисления NVIDIA экрану Intel не мешают так прямо.
 #[derive(Clone, Debug, Default)]
-pub struct Доли { pub счёт: std::collections::HashMap<u32, f64>, pub декодер: std::collections::HashMap<u32, f64> }
+pub struct Доли { pub счёт: std::collections::HashMap<u32, f64>, pub декодер: std::collections::HashMap<u32, f64>,
+    pub экран: std::collections::HashMap<u32, f64> }
+
+/// Чистая (видно в тесте): адаптер из имени экземпляра — `luid_0x…_0x…`.
+pub fn адаптер_экземпляра(имя: &str) -> Option<&str> {
+    let с = имя.find("luid_")?;
+    let хвост = &имя[с..];
+    let конец = хвост.find("_phys").unwrap_or(хвост.len());
+    Some(&хвост[..конец])
+}
 impl ВидеокартаПроцессов {
     pub fn открыть() -> Option<ВидеокартаПроцессов> {
         let mut з: Ручка = std::ptr::null_mut();
@@ -516,7 +574,8 @@ impl ВидеокартаПроцессов {
         unsafe { PdhCollectQueryData(з) };
         Some(ВидеокартаПроцессов { запрос: з, счётчик: с })
     }
-    pub fn снять(&self) -> Доли {
+    /// `экран` — адаптер экрана (`Видеокарта::адаптер`); `None` — доля экрана не считается.
+    pub fn снять(&self, экран: Option<&str>) -> Доли {
         let mut итог = Доли::default();
         if unsafe { PdhCollectQueryData(self.запрос) } != 0 { return итог; }
         // PDH_FMT_DOUBLE | PDH_FMT_NOCAP100
@@ -538,6 +597,10 @@ impl ВидеокартаПроцессов {
                 if э.значение.статус > 1 { continue; }
                 let имя = unsafe { строка(э.имя, начало, конец) };
                 let Some((pid, вид)) = экземпляр(&имя) else { continue };
+                // счётчик пишет цифры адаптера заглавными (`0x00010F5C`), DXGI — как сложим: сравниваем без регистра
+                if экран.is_some_and(|э| адаптер_экземпляра(&имя).is_some_and(|а| а.eq_ignore_ascii_case(э))) {
+                    *итог.экран.entry(pid).or_insert(0.0) += э.значение.число;
+                }
                 if вид.starts_with("3D") || вид.starts_with("Compute") {
                     *итог.счёт.entry(pid).or_insert(0.0) += э.значение.число;
                 } else if вид.starts_with("VideoDecode") {
@@ -569,6 +632,9 @@ mod тесты {
         assert_eq!(экземпляр("pid_27884_luid_0x00000000_0x0000D1A4_phys_0_eng_0_engtype_3D"), Some((27884, "3D")));
         assert_eq!(экземпляр("pid_4_luid_0x0_0x1_phys_0_eng_7_engtype_Compute 0"), Some((4, "Compute 0")));
         assert_eq!(экземпляр("_Total"), None);
+        assert_eq!(адаптер_экземпляра("pid_27884_luid_0x00000000_0x00010f5c_phys_0_eng_0_engtype_3D"),
+            Some("luid_0x00000000_0x00010f5c"));
+        assert_eq!(адаптер_экземпляра("_Total"), None);
     }
 
     /// Живая проба на своём же процессе: приоритет, очередь диска, рабочий набор, время создания (без чужих программ).
@@ -594,8 +660,10 @@ mod тесты {
         assert!(после < до, "рабочий набор {до} → {после}");
         let в = ВидеокартаПроцессов::открыть().expect("счётчик видеокарты");
         std::thread::sleep(Duration::from_millis(500));
-        let доли = в.снять();
-        eprintln!("видеокарта по процессам: {:?}; декодер: {:?}", доли.счёт, доли.декодер);
+        let экран = Видеокарта::открыть().expect("видеокарта экрана").адаптер().expect("адаптер экрана");
+        let доли = в.снять(Some(&экран));
+        eprintln!("экран {экран}; видеокарта по процессам: {:?}; декодер: {:?}; экран: {:?}", доли.счёт, доли.декодер, доли.экран);
+        assert!(доли.экран.keys().any(|pid| *pid != 0), "на адаптере экрана кто-то работает (dwm)");
         assert!(простой_ввода_с() < u64::MAX);
     }
 }
