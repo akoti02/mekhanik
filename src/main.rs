@@ -6,7 +6,8 @@
 //! (`install.ps1`), своя документация; удалят БАРС — «Механик» живёт и лечит дальше, а сказать ему что-то сам может
 //! уведомлением Windows. Единственная связь — оба знают друг о друге (`svyaz.rs` и `mekhanik_svyaz.rs` в БАРСе).
 //! Без окна; запускает задача Планировщика «Mekhanik» при входе (а умер — поднимает БАРС, если он есть). Замер и уступка
-//! экрану — `storozh.rs`, лечение — `lechenie.rs`, связь с БАРСом — `svyaz.rs`, копия ПК на Box — `kopiya.rs`.
+//! экрану — `storozh.rs`, лечение — `lechenie.rs`, связь с БАРСом — `svyaz.rs`, копия ПК на Box — `kopiya.rs`; зажим
+//! мощности видеокарты (13.11, перенесён из БАРСа) — `videokarta.rs`, своим потоком.
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 // имена по-русски, как в БАРСе: «р» и «p», «с» и «c» рядом — не путаница
 #![allow(confusable_idents, mixed_script_confusables)]
@@ -16,6 +17,7 @@ mod lechenie;
 mod okna;
 mod storozh;
 mod svyaz;
+mod videokarta;
 
 fn main() {
     let _ = std::fs::create_dir_all(svyaz::папка());
@@ -24,5 +26,7 @@ fn main() {
     svyaz::стоп_снят();
     // имя «Механик» в уведомлениях Windows (когда БАРСа нет, говорит сам)
     okna::зарегистрировать_отправителя();
+    // 🟥 13.11: зажим видеокарты — своим потоком (nvidia-smi идёт до секунды, а шаг сторожа 250 мс мерит опоздания)
+    let _ = std::thread::Builder::new().name("videokarta".into()).spawn(videokarta::работать);
     storozh::работать();
 }

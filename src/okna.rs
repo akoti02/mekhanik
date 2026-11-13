@@ -768,3 +768,76 @@ mod тесты_уведомления {
         assert_eq!(xml_текст("a<b>&\"c'"), "a&lt;b&gt;&amp;&quot;c&apos;");
     }
 }
+
+// ───────────────────────────── 🟥 13.11: зажим видеокарты (`videokarta.rs`) ─────────────────────────────
+
+#[repr(C)]
+struct СостояниеПитания { сеть: u8, флаг: u8, заряд: u8, система: u8, осталось: u32, полное: u32 }
+#[link(name = "kernel32")]
+extern "system" { fn GetSystemPowerStatus(п: *mut СостояниеПитания) -> i32; }
+
+/// От сети ли ПК: `Some(true)` — от сети, `Some(false)` — от батареи, `None` — Windows сама не знает.
+pub fn от_сети() -> Option<bool> {
+    let mut п = СостояниеПитания { сеть: 255, флаг: 0, заряд: 0, система: 0, осталось: 0, полное: 0 };
+    if unsafe { GetSystemPowerStatus(&mut п) } == 0 { return None; }
+    match п.сеть { 0 => Some(false), 1 => Some(true), _ => None }
+}
+
+/// Видеопамять, занятая на видеокартах (`\GPU Adapter Memory(*)\Dedicated Usage`, сумма по адаптерам). У встроенной
+/// Intel своей памяти нет (13.11: 0 МБ), так что это память NVIDIA. Почти ноль — на ней никто не работает, она может
+/// спать, и nvidia-smi её только разбудил бы. Счётчик — из учёта Windows, видеокарту он не будит.
+pub struct ПамятьВидеокарт { запрос: Ручка, счётчик: Ручка }
+impl ПамятьВидеокарт {
+    pub fn открыть() -> Option<ПамятьВидеокарт> {
+        let mut з: Ручка = std::ptr::null_mut();
+        if unsafe { PdhOpenQueryW(std::ptr::null(), 0, &mut з) } != 0 { return None; }
+        let п = широкая(r"\GPU Adapter Memory(*)\Dedicated Usage");
+        let mut с: Ручка = std::ptr::null_mut();
+        if unsafe { PdhAddEnglishCounterW(з, п.as_ptr(), 0, &mut с) } != 0 { return None; }
+        Some(ПамятьВидеокарт { запрос: з, счётчик: с })
+    }
+    /// Занято, МБ; `None` — счётчик не ответил.
+    pub fn занято_мб(&self) -> Option<u64> {
+        if unsafe { PdhCollectQueryData(self.запрос) } != 0 { return None; }
+        // PDH_FMT_DOUBLE | PDH_FMT_NOCAP100
+        const ФОРМАТ: u32 = 0x200 | 0x8000;
+        for _ in 0..3 {
+            let (mut байт, mut штук) = (0u32, 0u32);
+            let к = unsafe { PdhGetFormattedCounterArrayW(self.счётчик, ФОРМАТ, &mut байт, &mut штук, std::ptr::null_mut()) };
+            // PDH_MORE_DATA
+            if к != 0x8000_07D2 { return None; }
+            let mut буфер: Vec<u64> = vec![0; (байт as usize * 2) / 8 + 1];
+            let к = unsafe { PdhGetFormattedCounterArrayW(self.счётчик, ФОРМАТ, &mut байт, &mut штук,
+                буфер.as_mut_ptr() as *mut Элемент) };
+            if к == 0x8000_07D2 { continue; }
+            if к != 0 || штук as usize * std::mem::size_of::<Элемент>() > буфер.len() * 8 { return None; }
+            let элементы = unsafe { std::slice::from_raw_parts(буфер.as_ptr() as *const Элемент, штук as usize) };
+            let байт_занято: f64 = элементы.iter().filter(|э| э.значение.статус <= 1).map(|э| э.значение.число.max(0.0)).sum();
+            return Some((байт_занято / 1_048_576.0) as u64);
+        }
+        None
+    }
+}
+
+#[link(name = "advapi32")]
+extern "system" {
+    fn RegisterEventSourceW(сервер: *const u16, источник: *const u16) -> isize;
+    fn ReportEventW(h: isize, тип: u16, категория: u16, номер: u32, sid: *const c_void, строк: u16, байт: u32,
+                    строки: *const *const u16, данные: *const c_void) -> i32;
+    fn DeregisterEventSource(h: isize) -> i32;
+}
+
+/// Событие в журнал Windows «Приложение» от источника `Mekhanik` — так «Механик» зовёт задачу лечения, у которой права
+/// системы (у самого «Механика» их нет и не нужно). Права администратора на запись не нужны: проверено 13.11 — запись
+/// от обычного пользователя, задача с триггером на это событие сработала через 1,7 с.
+pub fn событие_windows(номер: u32, текст: &str) -> bool {
+    let источник = широкая(ОТПРАВИТЕЛЬ);
+    let h = unsafe { RegisterEventSourceW(std::ptr::null(), источник.as_ptr()) };
+    if h == 0 { return false; }
+    let т = широкая(текст);
+    let строки = [т.as_ptr()];
+    // EVENTLOG_INFORMATION_TYPE = 4
+    let ок = unsafe { ReportEventW(h, 4, 0, номер, std::ptr::null(), 1, 0, строки.as_ptr(), std::ptr::null()) } != 0;
+    unsafe { DeregisterEventSource(h) };
+    ок
+}

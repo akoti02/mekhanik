@@ -145,7 +145,8 @@ pub fn журнал(событие: &str, данные: &Value) {
     let строка = json!({ "ts": chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, false),
         "event": событие, "data": данные });
     if let Ok(mut ф) = std::fs::OpenOptions::new().create(true).append(true).open(&путь) {
-        let _ = writeln!(ф, "{строка}");
+        // 🟥 13.11: одной записью — пишут два потока (сторож и зажим видеокарты), строки не должны перемешаться
+        let _ = ф.write_all(format!("{строка}\n").as_bytes());
     }
 }
 

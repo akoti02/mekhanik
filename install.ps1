@@ -5,6 +5,7 @@
 # process and gives back every priority it lowered), kill by PID only if it did not exit in 15 s; 3. copy mekhanik.exe to
 # %LOCALAPPDATA%\Programs\Mekhanik; 4. make sure the logon task "Mekhanik" exists (no admin needed); 5. start it through
 # the task - never as a child of the calling shell (a process started from a terminal session dies with it).
+# 13.11: GPU power clamp healing needs one SYSTEM task, set once by an administrator: videokarta\ustanovit.ps1.
 param([switch]$Remove)
 $ErrorActionPreference = 'Stop'
 $src = $PSScriptRoot
@@ -38,6 +39,11 @@ if ($Remove) {
     Remove-Item 'HKCU:\Software\Classes\AppUserModelId\Mekhanik' -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
     Write-Host 'Mekhanik removed (program, task, notification name, data). Sources stay in' $src
+    # 13.11: the GPU clamp healing task runs as SYSTEM - only an administrator removes it
+    if (Test-Path (Join-Path $env:ProgramData 'Mekhanik\videokarta.json')) {
+        Write-Host 'GPU clamp healing (task Mekhanik-Videokarta, SYSTEM) stays - remove as administrator:' `
+            "powershell -ExecutionPolicy Bypass -File $src\videokarta\ustanovit.ps1 -Snyat"
+    }
     exit 0
 }
 
