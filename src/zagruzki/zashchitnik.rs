@@ -1,6 +1,9 @@
 //! Защитник Windows местно (`MpCmdRun -Scan -ScanType 3 -File … -DisableRemediation`) и AMSI — перенос
 //! `Defender.cs`, `Amsi.cs`. БЕЗ СЕТИ и БЕЗ обновления баз: `-SignatureUpdate` не зовём (Windows обновляет сама),
 //! Team Cymru и freshclam убраны. Проверка идёт ниже его работы (приоритет «простой»).
+//! 🟥 13.11 (свод): AMSI-функции — готовый механизм; разбор сторожа пока зовёт Защитник (`MpCmdRun`), а AMSI подключит
+//! сам пакет загрузок (в решение `razbor`), поэтому они числятся неиспользуемыми — глушим здесь, не роняя сборку.
+#![allow(dead_code)]
 
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
