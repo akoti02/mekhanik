@@ -37,17 +37,22 @@ function Sha-Lower([string]$path) { (Get-FileHash -LiteralPath $path -Algorithm 
 
 function Stop-Gently([string]$programExe) {
     $running = Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $programExe }
-    if (-not $running) { return }
+    $running = @($running)
+    if (-not $running.Count) { return }
+    # 13.11 fix: brain and window run from the same exe - wait for each, finish off only the ones still alive
+    $ids = @($running | ForEach-Object { [int]$_.ProcessId })
     New-Item -ItemType Directory -Force $data | Out-Null
     New-Item -ItemType File -Force (Join-Path $data 'stop.flag') | Out-Null
     $t = Get-Date
-    while (((Get-Date) - $t).TotalSeconds -lt 15 -and (Get-Process -Id $running.ProcessId -ErrorAction SilentlyContinue)) {
+    while (((Get-Date) - $t).TotalSeconds -lt 15 -and @(Get-Process -Id $ids -ErrorAction SilentlyContinue).Count) {
         Start-Sleep -Milliseconds 250
     }
-    if (Get-Process -Id $running.ProcessId -ErrorAction SilentlyContinue) {
-        Stop-Process -Id $running.ProcessId -Force
-        Write-Host "Mekhanik did not exit in 15 s - killed PID $($running.ProcessId) (next start gives back what it held)"
-    } else { Write-Host "Mekhanik exited by stop.flag (PID $($running.ProcessId)) - everything given back" }
+    $left = @(Get-Process -Id $ids -ErrorAction SilentlyContinue)
+    foreach ($p in $left) {
+        Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+        Write-Host "Mekhanik PID $($p.Id) did not exit in 15 s - killed (next start gives back what it held)"
+    }
+    if (-not $left.Count) { Write-Host "Mekhanik exited by stop.flag (PID $($ids -join ', ')) - everything given back" }
     Remove-Item (Join-Path $data 'stop.flag') -Force -ErrorAction SilentlyContinue
 }
 
@@ -114,6 +119,26 @@ $sha = Sha-Lower (Join-Path $relDir 'mekhanik.exe')
 Set-Content -LiteralPath (Join-Path $relDir 'mekhanik.exe.sha256') -Value "$sha *mekhanik.exe" -Encoding ascii
 Write-Host "release: $relDir (sha $($sha.Substring(0,12)))"
 
+# ===== who runs now (13.11 fix: the stub was copied over a running exe and the copy failed) =====
+# New model already running (the supervisor "--zapusk" from the stable path): only the release is needed - the program
+# picks it up from vypuski\ and switches itself (src\obnovlenie.rs). Old model (0.5.x, no key) or nothing: stop it
+# gently (stop.flag - it gives back everything it held) before the stub is replaced.
+if (-not $Suho) {
+    $runStub = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $exe })
+    $supervisor = @($runStub | Where-Object { $_.CommandLine -match '--zapusk' })
+    if ($supervisor.Count) {
+        Write-Host "supervisor runs (PID $($supervisor[0].ProcessId)) - release is in vypuski; the program switches itself within a minute"
+        exit 0
+    }
+    # 13.11 fix: the 0.5 task restarts a stopped brain after a minute (RestartOnFailure) and locks the stub again -
+    # hold (disable) the task while the stub is replaced; it is registered/enabled again below
+    if (Get-ScheduledTask -TaskName 'Mekhanik' -ErrorAction SilentlyContinue) {
+        try { Disable-ScheduledTask -TaskName 'Mekhanik' -ErrorAction Stop | Out-Null; Write-Host 'task Mekhanik held (disabled) for the switch' } catch {}
+    }
+    if ($runStub.Count) { Stop-Gently $exe }
+    foreach ($v in @(Get-ChildItem $versii -Directory -ErrorAction SilentlyContinue)) { Stop-Gently (Join-Path $v.FullName 'mekhanik.exe') }
+}
+
 # ===== install this version: versii\<ver>\ + current pointer + supervisor stub =====
 $verDir = Join-Path $versii $ver
 New-Item -ItemType Directory -Force $verDir | Out-Null
@@ -168,10 +193,14 @@ if ($Suho) {
 }
 
 $task = Get-ScheduledTask -TaskName 'Mekhanik' -ErrorAction SilentlyContinue
-if (-not $task) {
-    try { Register-ScheduledTask -TaskName 'Mekhanik' -Xml $taskXml -Force -ErrorAction Stop | Out-Null; Write-Host 'task Mekhanik registered (at logon, priority 4, --zapusk)' }
+# 13.11 fix: the task of 0.5.x (no "--zapusk", default priority 7 = below normal) is replaced by the new one; a task
+# that already runs the supervisor is left as is (the program updates itself)
+$staraya = $task -and (-not (@($task.Actions | Where-Object { $_.Arguments -match '--zapusk' }).Count) -or $task.Settings.Priority -ne 4)
+if (-not $task -or $staraya) {
+    try { Register-ScheduledTask -TaskName 'Mekhanik' -Xml $taskXml -Force -ErrorAction Stop | Out-Null; Write-Host "task Mekhanik $(if ($staraya) { 're-registered (was 0.5: no --zapusk or priority not 4)' } else { 'registered' }) (at logon, priority 4, --zapusk)" }
     catch { Write-Host "TASK NOT REGISTERED: $($_.Exception.Message)"; exit 1 }
-} else { Write-Host 'task Mekhanik already exists - left as is (the program updates itself)' }
+} else { Write-Host 'task Mekhanik already runs the supervisor - left as is (the program updates itself)' }
+try { Enable-ScheduledTask -TaskName 'Mekhanik' -ErrorAction Stop | Out-Null } catch {}
 
 Stop-Gently $exe
 schtasks /run /tn Mekhanik | Out-Null
