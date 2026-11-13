@@ -15,9 +15,14 @@
 mod kopiya;
 mod lechenie;
 mod okna;
+// 🟥 13.11 (волна 2а, ключ vnimanie): шина событий и карта внимания. Подключение модулей — за сведением; потоки окна
+// событий (`sobytiya_win::запустить`) и снятие внимания (`vnimanie::снять`) Мозг заводит при старте.
+mod sobytiya;
+mod sobytiya_win;
 mod storozh;
 mod svyaz;
 mod videokarta;
+mod vnimanie;
 
 fn main() {
     let _ = std::fs::create_dir_all(svyaz::папка());
