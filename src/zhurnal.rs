@@ -627,6 +627,38 @@ mod тесты {
         assert_eq!(с["first"], "2026-11-13T10:00:00.000+00:00");
     }
 
+    /// Живая проба (только чтение живого журнала): копия настоящего `zhurnal.jsonl` и `.old` во временной папке
+    /// раскладывается по дням — строк столько же, дней — сколько дат, сводки — по прошедшим дням.
+    #[test]
+    #[ignore]
+    fn живьём_перенос_копии_журнала() {
+        let живая = PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap()).join("mekhanik");
+        let база = папка_пробы("zhivoy");
+        let mut строк = 0usize;
+        let mut дни = BTreeSet::new();
+        for имя in СТАРЫЕ {
+            let Ok(б) = std::fs::read(живая.join(имя)) else { continue };
+            let т = String::from_utf8_lossy(&б).to_string();
+            строк += т.lines().filter(|с| !с.trim().is_empty()).count();
+            дни.extend(т.lines().filter_map(день_строки).map(str::to_string));
+            std::fs::write(база.join(имя), &б).unwrap();
+        }
+        let начало = Instant::now();
+        let mut п = Писарь::новый(база.clone());
+        let (перенесено, дней) = п.начать(&сегодня());
+        let заняло = начало.elapsed();
+        let в_днях: usize = Писарь::новый(база.clone()).дни().iter()
+            .map(|(_, ф)| std::fs::read_to_string(ф).unwrap().lines().count()).sum();
+        let сводок = std::fs::read_to_string(файл_сводки(&база)).unwrap_or_default().lines().count();
+        eprintln!("живой журнал: строк {строк}, дат {}, перенесено {перенесено} строк в {дней} дней за {заняло:?}, \
+            в файлах дней {в_днях}, сводок {сводок}", дни.len());
+        assert_eq!(перенесено as usize, строк);
+        assert_eq!(в_днях, строк, "ни одна строка не потеряна и не задвоена");
+        assert_eq!(дней, дни.len());
+        assert!(сводок >= дни.len() - 1, "сводка — каждому прошедшему дню");
+        let _ = std::fs::remove_dir_all(&база);
+    }
+
     /// Живая проба на своём процессе: поток записи поднимается сам, понижает себе диск и досылает очередь (в тестах
     /// папка «Механика» — своя временная, `svyaz::папка`).
     #[test]
