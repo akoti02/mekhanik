@@ -16,6 +16,7 @@ impl Прям {
     pub fn ширина(&self) -> i32 { self.прав - self.лев }
     pub fn высота(&self) -> i32 { self.низ - self.верх }
     pub fn внутри(&self, x: i32, y: i32) -> bool { x >= self.лев && x < self.прав && y >= self.верх && y < self.низ }
+    #[cfg(test)]
     pub fn пересекает(&self, д: &Прям) -> bool {
         self.лев < д.прав && д.лев < self.прав && self.верх < д.низ && д.верх < self.низ
     }
@@ -98,6 +99,7 @@ extern "system" {
     pub fn IsWindowVisible(окно: Ручка) -> i32;
     pub fn IsIconic(окно: Ручка) -> i32;
     pub fn GetMessageW(с: *mut Сообщение, окно: Ручка, от: u32, до: u32) -> i32;
+    #[cfg(test)]
     pub fn PeekMessageW(с: *mut Сообщение, окно: Ручка, от: u32, до: u32, убрать: u32) -> i32;
     pub fn TranslateMessage(с: *const Сообщение) -> i32;
     pub fn DispatchMessageW(с: *const Сообщение) -> isize;
