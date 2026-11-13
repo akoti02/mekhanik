@@ -95,6 +95,35 @@ pub fn время_потока_мс() -> u64 {
     (я + п) / 10_000
 }
 
+// ── приоритет своего потока (замер и страховщик не плетутся в хвосте очереди) ──
+#[link(name = "kernel32")]
+extern "system" {
+    fn SetThreadPriority(h: isize, приоритет: i32) -> i32;
+    fn SetThreadInformation(h: isize, класс: u32, данные: *const c_void, размер: u32) -> i32;
+}
+
+/// THREAD_PRIORITY_HIGHEST — поток замера.
+pub const ПОТОК_ВЫШЕ: i32 = 2;
+/// THREAD_PRIORITY_TIME_CRITICAL — страховщик (отпускает замороженных, если решения повисли).
+pub const ПОТОК_КРИТИЧНЫЙ: i32 = 15;
+
+#[repr(C)]
+struct ПитаниеПотока { версия: u32, управление: u32, состояние: u32 }
+
+/// 🟥 Поднять приоритет текущего потока (сам процесс приоритет ставит пакет `zhizn` в `main.rs` — тут только поток).
+pub fn приоритет_потока(уровень: i32) -> bool {
+    unsafe { SetThreadPriority(GetCurrentThread(), уровень) != 0 }
+}
+
+/// 🟥 Выключить экономный режим текущего потока (ThreadPowerThrottling, EXECUTION_SPEED выкл.): Windows не уводит поток
+/// замера на экономные ядра и не держит его на низкой частоте — иначе «процессор ждал» меряет сам «Механик», а не ПК.
+pub fn поток_без_эко() -> bool {
+    // ThreadPowerThrottling = 3; THREAD_POWER_THROTTLING_CURRENT_VERSION = 1; EXECUTION_SPEED = 1; состояние 0 — не экономить
+    let с = ПитаниеПотока { версия: 1, управление: 1, состояние: 0 };
+    unsafe { SetThreadInformation(GetCurrentThread(), 3, &с as *const _ as *const c_void,
+        std::mem::size_of::<ПитаниеПотока>() as u32) != 0 }
+}
+
 // ── видеокарта: запрос Direct3D 11 на адаптере экрана ──
 type Создать = unsafe extern "system" fn(*mut c_void, u32, isize, u32, *const u32, u32, u32, *mut *mut c_void,
     *mut u32, *mut *mut c_void) -> i32;
@@ -253,6 +282,9 @@ type Спросить = unsafe extern "system" fn(u32, *mut c_void, u32, *mut u3
 pub struct Проц {
     pub имя: String,
     pub родитель: u32,
+    /// 🟥 Время создания процесса (FILETIME, 100 нс) — личность процесса: номер Windows отдаёт снова, время создания нет.
+    /// Родитель засчитывается, только если создан раньше ребёнка; сверяем перед заморозкой и возвратом.
+    pub создан: u64,
     /// Время процессора, 100 нс.
     pub время: u64,
     /// Жёстких промахов памяти (чтение страниц с диска).
@@ -295,6 +327,8 @@ pub fn снимок(буф: &mut Vec<u8>) -> Option<Снимок> {
         let потоков = u32_(о + 4);
         let дескрипторов = u32_(о + 96);
         let промахи = u32_(о + 16) as u64;
+        // SYSTEM_PROCESS_INFORMATION: CreateTime (LARGE_INTEGER) — смещение 0x20; UserTime 0x28, KernelTime 0x30
+        let создан = u64_(о + 32);
         let время = u64_(о + 40) + u64_(о + 48);
         let длина_имени = (u32_(о + 56) & 0xFFFF) as usize;
         let адрес = u64_(о + 64) as usize;
@@ -309,7 +343,7 @@ pub fn снимок(буф: &mut Vec<u8>) -> Option<Снимок> {
             let слова: Vec<u16> = б[с..с + длина_имени].chunks_exact(2).map(|п| u16::from_le_bytes([п[0], п[1]])).collect();
             String::from_utf16_lossy(&слова)
         } else { "Idle".to_string() };
-        все.insert(pid, Проц { имя, родитель, время, промахи, память, рабочий, ввод_вывод, потоков, дескрипторов });
+        все.insert(pid, Проц { имя, родитель, создан, время, промахи, память, рабочий, ввод_вывод, потоков, дескрипторов });
         if следующий == 0 { break; }
         о += следующий;
     }
@@ -425,6 +459,41 @@ pub fn передний_pid() -> Option<u32> {
     let mut pid = 0u32;
     unsafe { GetWindowThreadProcessId(окно, &mut pid) };
     (pid != 0).then_some(pid)
+}
+
+// ── присутствие: его нет за ПК (заставка, замок), во весь ли экран ──
+#[link(name = "user32")]
+extern "system" {
+    fn SystemParametersInfoW(действие: u32, параметр: u32, значение: *mut c_void, обновить: u32) -> i32;
+    fn OpenInputDesktop(флаги: u32, наследовать: i32, доступ: u32) -> isize;
+    fn CloseDesktop(h: isize) -> i32;
+}
+#[link(name = "shell32")]
+extern "system" { fn SHQueryUserNotificationState(состояние: *mut i32) -> i32; }
+
+/// 🟥 Идёт экранная заставка (SPI_GETSCREENSAVERRUNNING = 0x0072) — его нет за ПК.
+pub fn заставка_идёт() -> bool {
+    let mut идёт: i32 = 0;
+    unsafe { SystemParametersInfoW(0x0072, 0, &mut идёт as *mut i32 as *mut c_void, 0); }
+    идёт != 0
+}
+
+/// 🟥 Сеанс заблокирован: при блокировке Windows уводит ввод на защищённый рабочий стол Winlogon, и обычный процесс
+/// не может открыть стол ввода. Открылся — не заблокировано (ручку сразу закрываем).
+pub fn заблокирован() -> bool {
+    // DESKTOP_READOBJECTS = 0x0001
+    let h = unsafe { OpenInputDesktop(0, 0, 0x0001) };
+    if h == 0 { return true; }
+    unsafe { CloseDesktop(h); }
+    false
+}
+
+/// 🟥 Что-то во весь экран или режим презентации (SHQueryUserNotificationState): видео на весь экран, игра. QUNS_BUSY=2,
+/// QUNS_RUNNING_D3D_FULL_SCREEN=3, QUNS_PRESENTATION_MODE=4.
+pub fn во_весь_экран() -> bool {
+    let mut с = 0i32;
+    if unsafe { SHQueryUserNotificationState(&mut с) } < 0 { return false; }
+    (2..=4).contains(&с)
 }
 
 /// Сеанс процесса (0 — службы Windows).
@@ -564,6 +633,21 @@ pub fn адаптер_экземпляра(имя: &str) -> Option<&str> {
     let конец = хвост.find("_phys").unwrap_or(хвост.len());
     Some(&хвост[..конец])
 }
+
+/// 🟥 Чистая (видно в тесте): свести доли движков по процессам. Правило DirectX (блог «GPUs in the Task Manager»): доли
+/// движков НЕ складываются — загрузка видеокарты процесса это его САМЫЙ занятый движок. `записи` — (номер, вид движка,
+/// адаптер, доля %). `счёт` — наибольший из 3D и вычислений; `декодер` — наибольший декодер; `экран` — наибольший любой
+/// движок на адаптере экрана.
+pub fn свести_доли(записи: &[(u32, String, String, f64)], экран: Option<&str>) -> Доли {
+    let mut итог = Доли::default();
+    let вверх = |м: &mut std::collections::HashMap<u32, f64>, pid: u32, зн: f64| { let я = м.entry(pid).or_insert(0.0); if зн > *я { *я = зн; } };
+    for (pid, вид, адаптер, зн) in записи {
+        if экран.is_some_and(|э| адаптер.eq_ignore_ascii_case(э)) { вверх(&mut итог.экран, *pid, *зн); }
+        if вид.starts_with("3D") || вид.starts_with("Compute") { вверх(&mut итог.счёт, *pid, *зн); }
+        else if вид.starts_with("VideoDecode") { вверх(&mut итог.декодер, *pid, *зн); }
+    }
+    итог
+}
 impl ВидеокартаПроцессов {
     pub fn открыть() -> Option<ВидеокартаПроцессов> {
         let mut з: Ручка = std::ptr::null_mut();
@@ -574,16 +658,69 @@ impl ВидеокартаПроцессов {
         unsafe { PdhCollectQueryData(з) };
         Some(ВидеокартаПроцессов { запрос: з, счётчик: с })
     }
-    /// `экран` — адаптер экрана (`Видеокарта::адаптер`); `None` — доля экрана не считается.
+    /// `экран` — адаптер экрана (`Видеокарта::адаптер`); `None` — доля экрана не считается. 🟥 Доли движков сводятся
+    /// наибольшим, а не суммой (`свести_доли`): счётчик пишет цифры адаптера заглавными — сравнение без регистра.
     pub fn снять(&self, экран: Option<&str>) -> Доли {
-        let mut итог = Доли::default();
-        if unsafe { PdhCollectQueryData(self.запрос) } != 0 { return итог; }
+        if unsafe { PdhCollectQueryData(self.запрос) } != 0 { return Доли::default(); }
         // PDH_FMT_DOUBLE | PDH_FMT_NOCAP100
         const ФОРМАТ: u32 = 0x200 | 0x8000;
         for _ in 0..3 {
             let (mut байт, mut штук) = (0u32, 0u32);
             let к = unsafe { PdhGetFormattedCounterArrayW(self.счётчик, ФОРМАТ, &mut байт, &mut штук, std::ptr::null_mut()) };
             // PDH_MORE_DATA
+            if к != 0x8000_07D2 { return Доли::default(); }
+            let mut буфер: Vec<u64> = vec![0; (байт as usize * 2) / 8 + 1];
+            let к = unsafe { PdhGetFormattedCounterArrayW(self.счётчик, ФОРМАТ, &mut байт, &mut штук,
+                буфер.as_mut_ptr() as *mut Элемент) };
+            if к == 0x8000_07D2 { continue; }
+            if к != 0 || штук as usize * std::mem::size_of::<Элемент>() > буфер.len() * 8 { return Доли::default(); }
+            let начало = буфер.as_ptr() as usize;
+            let конец = начало + буфер.len() * 8;
+            let элементы = unsafe { std::slice::from_raw_parts(буфер.as_ptr() as *const Элемент, штук as usize) };
+            let mut записи: Vec<(u32, String, String, f64)> = Vec::with_capacity(штук as usize);
+            for э in элементы {
+                if э.значение.статус > 1 { continue; }
+                let имя = unsafe { строка(э.имя, начало, конец) };
+                let Some((pid, вид)) = экземпляр(&имя) else { continue };
+                let адаптер = адаптер_экземпляра(&имя).unwrap_or("").to_string();
+                записи.push((pid, вид.to_string(), адаптер, э.значение.число));
+            }
+            return свести_доли(&записи, экран);
+        }
+        Доли::default()
+    }
+}
+
+/// Чистая (видно в тесте): номер процесса и адаптер из имени экземпляра видеопамяти (`pid_39764_luid_0x…_0x…_phys_0`).
+pub fn экземпляр_памяти(имя: &str) -> Option<(u32, &str)> {
+    let хвост = имя.strip_prefix("pid_")?;
+    let конец = хвост.find('_')?;
+    let pid = хвост[..конец].parse().ok()?;
+    Some((pid, адаптер_экземпляра(имя)?))
+}
+
+/// 🟥 Видеопамять по процессам — счётчик `\GPU Process Memory(*)\Dedicated Usage` (≈0 мс, без обхода движков): кто
+/// держит видеопамять NVIDIA. У встроенной Intel своей памяти нет, так что доля адаптера экрана тут почти всегда 0.
+pub struct ПамятьВидеокартПроцессов { запрос: Ручка, счётчик: Ручка }
+impl ПамятьВидеокартПроцессов {
+    pub fn открыть() -> Option<ПамятьВидеокартПроцессов> {
+        let mut з: Ручка = std::ptr::null_mut();
+        if unsafe { PdhOpenQueryW(std::ptr::null(), 0, &mut з) } != 0 { return None; }
+        let п = широкая(r"\GPU Process Memory(*)\Dedicated Usage");
+        let mut с: Ручка = std::ptr::null_mut();
+        if unsafe { PdhAddEnglishCounterW(з, п.as_ptr(), 0, &mut с) } != 0 { return None; }
+        unsafe { PdhCollectQueryData(з) };
+        Some(ПамятьВидеокартПроцессов { запрос: з, счётчик: с })
+    }
+    /// Видеопамять по процессам, МБ. `адаптер` — только на нём (`None` — на всех адаптерах, сумма по процессу).
+    pub fn снять(&self, адаптер: Option<&str>) -> std::collections::HashMap<u32, u64> {
+        let mut итог = std::collections::HashMap::new();
+        if unsafe { PdhCollectQueryData(self.запрос) } != 0 { return итог; }
+        // PDH_FMT_DOUBLE | PDH_FMT_NOCAP100
+        const ФОРМАТ: u32 = 0x200 | 0x8000;
+        for _ in 0..3 {
+            let (mut байт, mut штук) = (0u32, 0u32);
+            let к = unsafe { PdhGetFormattedCounterArrayW(self.счётчик, ФОРМАТ, &mut байт, &mut штук, std::ptr::null_mut()) };
             if к != 0x8000_07D2 { return итог; }
             let mut буфер: Vec<u64> = vec![0; (байт as usize * 2) / 8 + 1];
             let к = unsafe { PdhGetFormattedCounterArrayW(self.счётчик, ФОРМАТ, &mut байт, &mut штук,
@@ -596,16 +733,9 @@ impl ВидеокартаПроцессов {
             for э in элементы {
                 if э.значение.статус > 1 { continue; }
                 let имя = unsafe { строка(э.имя, начало, конец) };
-                let Some((pid, вид)) = экземпляр(&имя) else { continue };
-                // счётчик пишет цифры адаптера заглавными (`0x00010F5C`), DXGI — как сложим: сравниваем без регистра
-                if экран.is_some_and(|э| адаптер_экземпляра(&имя).is_some_and(|а| а.eq_ignore_ascii_case(э))) {
-                    *итог.экран.entry(pid).or_insert(0.0) += э.значение.число;
-                }
-                if вид.starts_with("3D") || вид.starts_with("Compute") {
-                    *итог.счёт.entry(pid).or_insert(0.0) += э.значение.число;
-                } else if вид.starts_with("VideoDecode") {
-                    *итог.декодер.entry(pid).or_insert(0.0) += э.значение.число;
-                }
+                let Some((pid, а)) = экземпляр_памяти(&имя) else { continue };
+                if адаптер.is_some_and(|э| !а.eq_ignore_ascii_case(э)) { continue; }
+                *итог.entry(pid).or_insert(0) += (э.значение.число.max(0.0) / 1_048_576.0) as u64;
             }
             return итог;
         }
@@ -635,6 +765,39 @@ mod тесты {
         assert_eq!(адаптер_экземпляра("pid_27884_luid_0x00000000_0x00010f5c_phys_0_eng_0_engtype_3D"),
             Some("luid_0x00000000_0x00010f5c"));
         assert_eq!(адаптер_экземпляра("_Total"), None);
+        assert_eq!(экземпляр_памяти("pid_39764_luid_0x00000000_0x00010d43_phys_0"),
+            Some((39764, "luid_0x00000000_0x00010d43")));
+        assert_eq!(экземпляр_памяти("_Total"), None);
+    }
+
+    /// 🟥 Правило DirectX: доли движков процесса не складываются — берём наибольший. Красный на старом (там `+=`):
+    /// 3D 60 % и Compute 40 % одного процесса давали 100 %, теперь 60 %.
+    #[test]
+    fn доли_движков_не_складываются() {
+        let экр = "luid_0x00000000_0x00010d43";
+        let записи = vec![
+            (10u32, "3D".to_string(), экр.to_string(), 60.0),
+            (10, "Compute 0".into(), экр.into(), 40.0),
+            (10, "VideoDecode".into(), экр.into(), 15.0),
+            (20, "3D".into(), "luid_0x00000000_0x0e086898".into(), 90.0), // NVIDIA — не на экране
+        ];
+        let доли = свести_доли(&записи, Some(экр));
+        assert_eq!(доли.счёт.get(&10), Some(&60.0), "наибольший из 3D и Compute, не сумма");
+        assert_eq!(доли.декодер.get(&10), Some(&15.0));
+        assert_eq!(доли.экран.get(&10), Some(&60.0), "на экране — наибольший движок процесса");
+        assert_eq!(доли.счёт.get(&20), Some(&90.0));
+        assert_eq!(доли.экран.get(&20), None, "NVIDIA не на адаптере экрана");
+    }
+
+    /// Живьём на своём сеансе (не заблокирован, заставки нет): приоритет и экономный режим потока, присутствие.
+    #[test]
+    #[ignore]
+    fn живьём_поток_и_присутствие() {
+        assert!(приоритет_потока(ПОТОК_ВЫШЕ), "поднять приоритет своего потока");
+        assert!(поток_без_эко(), "выключить экономный режим своего потока");
+        assert!(приоритет_потока(0), "вернуть обычный");
+        assert!(!заблокирован(), "сеанс теста не заблокирован");
+        assert!(!заставка_идёт(), "заставки нет");
     }
 
     /// Живая проба на своём же процессе: приоритет, очередь диска, рабочий набор, время создания (без чужих программ).
@@ -664,6 +827,8 @@ mod тесты {
         let доли = в.снять(Some(&экран));
         eprintln!("экран {экран}; видеокарта по процессам: {:?}; декодер: {:?}; экран: {:?}", доли.счёт, доли.декодер, доли.экран);
         assert!(доли.экран.keys().any(|pid| *pid != 0), "на адаптере экрана кто-то работает (dwm)");
+        let vram = ПамятьВидеокартПроцессов::открыть().expect("счётчик видеопамяти").снять(None);
+        eprintln!("видеопамять по процессам, МБ: {vram:?}");
         assert!(простой_ввода_с() < u64::MAX);
     }
 }
