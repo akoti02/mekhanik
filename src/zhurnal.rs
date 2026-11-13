@@ -169,6 +169,30 @@ extern "system" {
     fn GetCurrentThread() -> isize;
     fn GetModuleHandleW(имя: *const u16) -> isize;
     fn GetProcAddress(модуль: isize, имя: *const u8) -> *const c_void;
+    fn CreateMutexW(атрибуты: *const c_void, взять: i32, имя: *const u16) -> isize;
+    fn WaitForSingleObject(h: isize, мс: u32) -> u32;
+    fn ReleaseMutex(h: isize) -> i32;
+    fn CloseHandle(h: isize) -> i32;
+}
+
+/// Обслуживать журнал (перенос старого, сводки, чистка) — одному процессу на папку: журнал один, а писать в него
+/// могут и мозг, и окно (`--okno`). Занято другим — пропустить (сделает он); замка не создать — сами.
+fn обслуживать_одному<T>(база: &Path, ф: impl FnOnce() -> T) -> Option<T> {
+    // имя — по пути папки (у каждой пробы своя папка — свой замок)
+    let mut х: u64 = 0xcbf2_9ce4_8422_2325;
+    for б in база.to_string_lossy().to_lowercase().bytes() { х = (х ^ б as u64).wrapping_mul(0x0100_0000_01b3); }
+    let имя: Vec<u16> = format!(r"Local\mekhanik-zhurnal-{х:016x}").encode_utf16().chain(std::iter::once(0)).collect();
+    let h = unsafe { CreateMutexW(std::ptr::null(), 0, имя.as_ptr()) };
+    if h == 0 { return Some(ф()); }
+    // WAIT_OBJECT_0 и WAIT_ABANDONED (прежний хозяин упал) — замок наш
+    let ответ = unsafe { WaitForSingleObject(h, 0) };
+    let итог = if ответ == 0 || ответ == 0x80 {
+        let и = ф();
+        unsafe { ReleaseMutex(h) };
+        Some(и)
+    } else { None };
+    unsafe { CloseHandle(h) };
+    итог
 }
 
 /// Своему потоку — низкая очередь диска (`NtSetInformationThread`, ThreadIoPriority = 22, 1 — низкая): процессор у
@@ -252,14 +276,22 @@ impl Писарь {
     /// Начало: перенести старый журнал, сводки прошедших дней, чистка. Вернуть (строк перенесено, дней).
     pub fn начать(&mut self, сегодня: &str) -> (u64, usize) {
         let _ = std::fs::create_dir_all(self.папка());
-        let перенесено = self.перенести_старый();
-        self.обслужить(сегодня);
-        перенесено
+        let база = self.база.clone();
+        let итог = обслуживать_одному(&база, || {
+            let перенесено = self.перенести_старый();
+            self.обслужить(сегодня);
+            перенесено
+        });
+        // обслуживает другой процесс — день считаем обслуженным (завтра — снова попробуем)
+        if итог.is_none() { self.обслужен = сегодня.to_string(); }
+        итог.unwrap_or((0, 0))
     }
 
     /// День сменился (или ещё не обслужен) — сводки и чистка.
     pub fn проверить_день(&mut self, сегодня: &str) {
-        if сегодня > self.обслужен.as_str() { self.обслужить(сегодня); }
+        if сегодня <= self.обслужен.as_str() { return; }
+        let база = self.база.clone();
+        if обслуживать_одному(&база, || self.обслужить(сегодня)).is_none() { self.обслужен = сегодня.to_string(); }
     }
 
     fn обслужить(&mut self, сегодня: &str) {

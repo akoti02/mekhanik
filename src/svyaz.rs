@@ -62,9 +62,26 @@ const ЗА_ПК_С: u64 = 120;
 
 pub fn папка() -> PathBuf {
     // 🟥 13.11: тесты — в своей временной папке: данные живого «Механика» тесты не трогают
-    if cfg!(test) { return std::env::temp_dir().join(format!("mekhanik-test-{}", std::process::id())); }
+    if cfg!(test) { return тестовая_папка(); }
     let база = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
     база.join("mekhanik")
+}
+
+/// Папка тестов: своя на каждый прогон; прогоны старше часа — стереть (свои же, `mekhanik-test-*`).
+fn тестовая_папка() -> PathBuf {
+    static П: OnceLock<PathBuf> = OnceLock::new();
+    П.get_or_init(|| {
+        let врем = std::env::temp_dir();
+        if let Ok(д) = std::fs::read_dir(&врем) {
+            for ф in д.filter_map(Result::ok) {
+                let имя = ф.file_name().to_string_lossy().to_string();
+                let старая = ф.metadata().and_then(|м| м.modified()).ok().and_then(|т| т.elapsed().ok())
+                    .is_some_and(|в| в > Duration::from_secs(3600));
+                if имя.starts_with("mekhanik-test-") && старая { let _ = std::fs::remove_dir_all(ф.path()); }
+            }
+        }
+        врем.join(format!("mekhanik-test-{}", std::process::id()))
+    }).clone()
 }
 
 pub fn сейчас_мс() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).map(|д| д.as_millis() as u64).unwrap_or(0) }
@@ -396,6 +413,7 @@ pub fn подмести() {
     файлы.sort_by_key(|п| имя_по_порядку(п));
     let mut лишних = файлы.len().saturating_sub(СООБЩЕНИЙ_МАКС);
     for ф in &файлы {
+        if лишних == 0 && !старое { break; }
         let v: Value = std::fs::read_to_string(ф).ok().and_then(|т| serde_json::from_str(&т).ok()).unwrap_or_default();
         let строка = v.get("kind").and_then(Value::as_str) == Some("log");
         let просрочено = v.get("until_ms").and_then(Value::as_u64).is_some_and(|до| сейчас > до);
@@ -1081,6 +1099,35 @@ mod тесты {
         let mut и = vec![PathBuf::from("1794-10.json"), PathBuf::from("1794-9.json"), PathBuf::from("1793-99.json")];
         и.sort_by_key(|п| имя_по_порядку(п));
         assert_eq!(и, vec![PathBuf::from("1793-99.json"), PathBuf::from("1794-9.json"), PathBuf::from("1794-10.json")]);
+    }
+
+    /// 🟥 Насквозь, через общие функции (своя временная папка): БАРС свеж, но разум выключен его словом (флаг) — сигнал
+    /// разуму не уходит, в своём журнале — «не послан»; строка в журнал БАРСа уходит сообщением с `proto`. КРАСНЫЙ на
+    /// старом коде: флаг не читался — 13.11 после 17:55 разуму ушло ещё 7 сигналов в пустоту.
+    #[test]
+    fn разум_выключен_насквозь() {
+        let п = папка();
+        std::fs::create_dir_all(&п).unwrap();
+        std::fs::write(п.join("mind_off.flag"), "{}").unwrap();
+        // номера — несуществующие: сверку не пройдут, а свежесть отметки — по `ms`
+        std::fs::write(п.join("ot_barsa.json"), json!({ "ms": сейчас_мс(), "window": 4_000_000_001u32, "head": 4_000_000_002u32,
+            "engines": [], "compute": [], "work": [], "mind_loaded": false, "mind_idle_s": null, "video": false, "mode": "СВОБОДЕН" })
+            .to_string()).unwrap();
+        let б = прочитать_барс();
+        assert!(б.жив && б.разум_выключен && б.окно.is_none(), "{б:?}");
+        let mut сказано = HashMap::new();
+        сказать_разуму(&mut сказано, "механик:проба_насквозь".into(), Duration::from_secs(3600), "Проба", "насквозь".into());
+        журнал_барсу("проба_насквозь_барсу", &json!({ "н": 1 }));
+        assert!(zhurnal::дослать(Duration::from_secs(5)));
+        let день = std::fs::read_to_string(zhurnal::файл_дня(&п, &zhurnal::сегодня())).unwrap();
+        assert!(день.contains("сигнал_разуму_не_послан") && день.contains("механик:проба_насквозь"));
+        assert!(!день.lines().any(|с| с.contains("\"event\":\"сигнал_разуму\"") && с.contains("проба_насквозь")), "разуму — ничего");
+        let сообщения: Vec<Value> = std::fs::read_dir(п.join("soobshcheniya")).unwrap().filter_map(Result::ok)
+            .filter_map(|ф| std::fs::read_to_string(ф.path()).ok()).filter_map(|т| serde_json::from_str(&т).ok()).collect();
+        assert!(!сообщения.iter().any(|v| v["kind"] == "signal" && v.to_string().contains("проба_насквозь")), "сигнала нет");
+        let строка = сообщения.iter().find(|v| v["event"] == "проба_насквозь_барсу").expect("строка в журнал БАРСа");
+        assert_eq!((строка["kind"].clone(), строка["proto"].clone()), (json!("log"), json!(ПРОТОКОЛ)));
+        assert!(день.lines().any(|с| с.contains("проба_насквозь_барсу") && с.contains("\"lvl\":1")));
     }
 
     /// Живьём на своей временной папке (тесты не трогают данные «Механика»): просьба с `proto` и сроком, сигнал разуму
