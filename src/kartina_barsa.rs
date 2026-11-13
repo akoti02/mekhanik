@@ -17,7 +17,7 @@
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
-use super::{разобрать_барс, Барс};
+use crate::svyaz::{разобрать_барс, Барс};
 
 /// Отметка старше этого — БАРСа «нет» (до этого — «замолк»: последняя картина держится).
 pub const ЗАМОЛК_МС: u64 = 120_000;
