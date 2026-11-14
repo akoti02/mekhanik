@@ -17,6 +17,46 @@ extern "system" {
     fn CreateMutexW(атрибуты: *const c_void, взять: i32, имя: *const u16) -> isize;
     fn CloseHandle(h: isize) -> i32;
     fn GetLastError() -> u32;
+    fn OpenProcess(доступ: u32, наследовать: i32, pid: u32) -> isize;
+    fn TerminateProcess(h: isize, код: u32) -> i32;
+}
+
+/// 🟥 ЧИСТАЯ (видно в тесте): окно прежней версии — процесс «Механика» из ДРУГОЙ папки `versii\<версия>\` (не мой exe и
+/// не пенёк «запуска» `Programs\Mekhanik\mekhanik.exe`). Сравнение путей — без регистра.
+pub fn окно_прежней_версии(путь: &str, мой: &str) -> bool {
+    let п = путь.to_lowercase().replace('/', "\\");
+    let м = мой.to_lowercase().replace('/', "\\");
+    п != м && п.contains("\\versii\\") && п.ends_with("\\mekhanik.exe")
+}
+
+/// 🟥 14.11 (живьём: после самообновления 0.6 → 0.9 значок остался от 0.6 — окно никто не сменил): при старте Мозг
+/// закрывает окно ПРЕЖНЕЙ версии «Механика» (своё же окно — в нём нет ничего, что можно потерять: всё состояние у Мозга
+/// и в файлах), чтобы `поднять_окно` поднял окно своей версии. Чужие процессы не трогает — только «Механик» из
+/// `versii\` другой версии.
+pub fn сменить_старое_окно() {
+    let Some(мой) = std::env::current_exe().ok().map(|п| п.to_string_lossy().into_owned()) else { return };
+    let я = std::process::id();
+    for (pid, _, имя) in crate::okna::процессы() {
+        if pid == я || !имя.eq_ignore_ascii_case("mekhanik.exe") { continue; }
+        let Some(путь) = crate::okna::путь_процесса(pid) else { continue };
+        if !окно_прежней_версии(&путь, &мой) { continue; }
+        // PROCESS_TERMINATE = 0x0001
+        let h = unsafe { OpenProcess(0x0001, 0, pid) };
+        if h == 0 { continue; }
+        let ок = unsafe { TerminateProcess(h, 0) } != 0;
+        unsafe { CloseHandle(h) };
+        crate::svyaz::журнал("механик_окно_прежней_версии_закрыто", &json!({ "pid": pid, "путь": путь, "закрыто": ок }));
+    }
+}
+
+/// 🟥 14.11: окно пропало (закрыли, упало) — Мозг поднимает его снова раз в 30 с (если владелец не на паузе).
+/// Раньше окно поднималось только при старте Мозга.
+pub fn сторожить_окно() {
+    loop {
+        std::thread::sleep(Duration::from_secs(30));
+        if crate::svyaz::просят_выйти() { return; }
+        поднять_окно();
+    }
 }
 
 /// Имя мьютекса окна (значка у часов): окно его держит, Мозг по нему видит, живо ли окно.
@@ -170,6 +210,17 @@ mod тесты {
         assert!(!пауза_активна(r#"{"do_ms": 1000}"#, 2000), "срок вышел — нет");
         assert!(!пауза_активна("не json", 1), "мусор — нет паузы");
         assert!(!пауза_активна(r#"{"иное": 5}"#, 1), "нет поля — нет паузы");
+    }
+
+    /// 🟥 14.11: окно прежней версии — только «Механик» из другой папки versii; пенёк «запуска», мой exe и чужие — нет.
+    #[test]
+    fn окно_прежней_версии_только_из_versii() {
+        let мой = r"C:\Users\a\AppData\Local\Programs\Mekhanik\versii\0.9.0\mekhanik.exe";
+        assert!(окно_прежней_версии(r"C:\Users\a\AppData\Local\Programs\Mekhanik\versii\0.6.0\mekhanik.exe", мой));
+        assert!(окно_прежней_версии(r"c:\users\a\appdata\local\programs\mekhanik\VERSII\0.6.0\MEKHANIK.EXE", мой), "регистр");
+        assert!(!окно_прежней_версии(мой, мой), "мой exe — не трогать");
+        assert!(!окно_прежней_версии(r"C:\Users\a\AppData\Local\Programs\Mekhanik\mekhanik.exe", мой), "пенёк «запуска»");
+        assert!(!окно_прежней_версии(r"C:\Tools\versii\0.1\other.exe", мой), "чужая программа");
     }
 
     #[test]
