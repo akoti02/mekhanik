@@ -171,6 +171,8 @@ $taskXml = @"
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
     <Priority>4</Priority>
+    <!-- restarts "--zapusk" if it dies unexpectedly (non-zero exit). On give-up (5 crashes/hour) "--zapusk" exits 0 on
+         purpose, so this does NOT resurrect a broken version - the brain stays down until logon or a manual start. -->
     <RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure>
     <Enabled>true</Enabled>
   </Settings>

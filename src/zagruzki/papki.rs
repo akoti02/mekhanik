@@ -54,9 +54,12 @@ pub fn целиком() -> Vec<PathBuf> {
 }
 
 /// Части пути, которые означают папку разработки/сборки — внутрь не лезем вовсе.
+/// 🟥 Без голых `bin`/`obj`: они исключали любую папку с таким именем, и вредонос в `Downloads\App\bin\app.exe`
+/// не проверялся ни своей проверкой, ни Защитником. Дерево сборки под `C:\dev` и так вне проверки; `target`,
+/// `node_modules`, `.git` остаются по именам.
 const ЗАПРЕТНЫЕ_ЧАСТИ: &[&str] = &[
     "node_modules", ".git", "target", "__pycache__", ".venv", "venv", ".gradle", ".idea", ".vs", ".rproj.user",
-    ".cargo", ".cache", "obj", "bin",
+    ".cargo", ".cache",
 ];
 
 /// НЕ трогать: всё под `C:\dev`, а также любой путь с запретной частью (папки сборок и окружений).
@@ -106,6 +109,16 @@ mod тесты {
         assert!(!исключён(Path::new(r"C:\Users\akoti\Downloads\Week7_lab.zip")));
         // «development» в имени файла — не папка разработки
         assert!(!исключён(Path::new(r"C:\Users\akoti\Downloads\development-guide.pdf")));
+    }
+
+    /// 🟥 Красно на старом: вредонос в `Downloads\...\bin\` (или `obj\`) должен проверяться — старое слепо исключало
+    /// любые bin/obj. Настоящие деревья сборки под `C:\dev` и `target`/`node_modules` остаются вне проверки.
+    #[test]
+    fn bin_obj_в_загрузках_проверяются() {
+        assert!(!исключён(Path::new(r"C:\Users\akoti\Downloads\App\bin\app.exe")));
+        assert!(!исключён(Path::new(r"C:\Users\akoti\Downloads\App\obj\x.dll")));
+        assert!(исключён(Path::new(r"C:\dev\proj\bin\app.exe")), "сборка под C:\\dev — по-прежнему вне проверки");
+        assert!(исключён(Path::new(r"C:\Users\akoti\Downloads\rust\target\debug\app.exe")), "target остаётся исключён");
     }
 
     #[test]
