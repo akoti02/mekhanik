@@ -23,6 +23,10 @@ mod lechenie;
 mod obnovlenie;
 mod okna;
 mod okno_mozg;
+// 🟥 13.11 (волна 2б, ключ predvidenie): предвидение (поводы, прогноз, советы до пика) и чёрный ящик. Свод кормит
+// `Предвидение::шаг` входом из kto/vnimanie/svyaz, исполняет советы лечением, пишет quiet_until в barsu.json.
+mod predvidenie;
+mod yashchik;
 // 🟥 13.11 (волна 2а, ключ vnimanie): шина событий и карта внимания. Потоки окна событий (`sobytiya_win::запустить`)
 // и снятие внимания (`vnimanie::снять`) Мозг заводит при старте.
 mod sobytiya;
