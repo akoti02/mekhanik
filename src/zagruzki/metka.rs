@@ -65,15 +65,25 @@ pub fn разобрать(текст: &str) -> Option<МеткаСети> {
 }
 
 /// Прочитать метку файла. Открываем поток `<путь>:Zone.Identifier`; нет потока — `None` (файл не из интернета).
+/// 🟥 Без `canonicalize`: он падал на занятом/пишущемся файле (гонка, нет прав) и файл из интернета молча становился
+/// «без метки» — программа из сети не придерживалась. Путь сторож и так даёт абсолютный; поток читаем прямо.
 pub fn прочитать(путь: &std::path::Path) -> Option<МеткаСети> {
-    let полный = std::fs::canonicalize(путь).ok()?;
-    // canonicalize даёт префикс \\?\ — поток дописываем к нему
-    let поток = format!("{}:Zone.Identifier", полный.display());
-    let текст = std::fs::read_to_string(&поток).ok()?;
+    let текст = std::fs::read_to_string(путь_потока(путь)).ok()?;
     if текст.len() > 64 * 1024 {
         return None;
     }
     разобрать(&текст)
+}
+
+/// Чистая (видно в тесте): путь к потоку метки `<файл>:Zone.Identifier`. Длинный путь (≥248) получает префикс `\\?\`,
+/// иначе Windows не откроет поток.
+pub fn путь_потока(путь: &std::path::Path) -> String {
+    let п = путь.display().to_string().replace('/', "\\");
+    if п.len() >= 248 && !п.starts_with(r"\\?\") {
+        format!(r"\\?\{п}:Zone.Identifier")
+    } else {
+        format!("{п}:Zone.Identifier")
+    }
 }
 
 #[cfg(test)]
@@ -109,5 +119,17 @@ mod тесты {
     #[test]
     fn хост_с_портом_и_логином() {
         assert_eq!(хост_из_url("https://user@files.example.com:8443/a/b"), Some("files.example.com".to_string()));
+    }
+
+    #[test]
+    fn путь_потока_прямой_без_canonicalize() {
+        // обычный абсолютный путь — поток дописан как есть, без \\?\ и без обращения к диску
+        assert_eq!(путь_потока(std::path::Path::new(r"C:\Users\akoti\Downloads\прога.exe")),
+            r"C:\Users\akoti\Downloads\прога.exe:Zone.Identifier");
+        // косые черты приводятся к обратным
+        assert_eq!(путь_потока(std::path::Path::new("C:/Downloads/a.bin")), r"C:\Downloads\a.bin:Zone.Identifier");
+        // длинный путь получает префикс \\?\
+        let длинный = format!(r"C:\Downloads\{}\x.exe", "a".repeat(260));
+        assert!(путь_потока(std::path::Path::new(&длинный)).starts_with(r"\\?\"));
     }
 }
