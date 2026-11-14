@@ -41,6 +41,8 @@ pub fn сменить_старое_окно() {
         if pid == я || !имя.eq_ignore_ascii_case("mekhanik.exe") { continue; }
         let Some(путь) = crate::okna::путь_процесса(pid) else { continue };
         if !окно_прежней_версии(&путь, &мой) { continue; }
+        // 🟥 14.11 (аудит): только свой сеанс Windows — «Механик» другого пользователя не наш
+        if crate::okna::сеанс(pid) != crate::okna::сеанс(я) { continue; }
         // PROCESS_TERMINATE = 0x0001, SYNCHRONIZE = 0x0010_0000 (дождаться выхода)
         let h = unsafe { OpenProcess(0x0001 | 0x0010_0000, 0, pid) };
         if h == 0 { continue; }

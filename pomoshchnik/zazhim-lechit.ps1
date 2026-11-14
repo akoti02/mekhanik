@@ -111,7 +111,9 @@ if (-not $Proba -and -not (Zazhata $z0)) {
   Napisat-Itog 0 'ne_nuzhno' $z0 $null
   exit 0
 }
-try { Set-Content -LiteralPath $pamyat -Value ((Get-Date).ToString('o')) -Encoding ascii -ErrorAction Stop } catch {}
+# 14.11 (audit): the installer probe (-Proba) must not stamp the rate limit - a real clamp right after install would be
+# answered 'chasto' and left unhealed
+if (-not $Proba) { try { Set-Content -LiteralPath $pamyat -Value ((Get-Date).ToString('o')) -Encoding ascii -ErrorAction Stop } catch {} }
 
 # --- step 1: restart nvpcf (Dynamic Boost)
 $u = Ustroystvo

@@ -105,7 +105,11 @@ if (-not $admin) {
 function Say([string]$m) {
   $line = ('{0}  {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $m)
   Write-Output $line
-  if (Test-Path -LiteralPath $dir) { try { Add-Content -Path $log -Value $line -Encoding ascii } catch {} }
+  if (Test-Path -LiteralPath $dir) {
+    # 14.11 (audit): rotate like the healer logs (512 KB)
+    try { if ((Get-Item -LiteralPath $log -ErrorAction Stop).Length -gt 512KB) { Move-Item -LiteralPath $log -Destination "$log.old" -Force } } catch {}
+    try { Add-Content -Path $log -Value $line -Encoding ascii } catch {}
+  }
 }
 
 # the job before 13.11 lived in BARS (task BARS-Videokarta) - remove if present
@@ -148,6 +152,16 @@ New-Item -ItemType Directory -Force -Path $dir | Out-Null
 if (Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue) { & icacls.exe "$dir\*" /reset /T /C /Q 2>&1 | Out-Null }
 $vladelec = (Get-Acl -LiteralPath $dir).GetOwner([Security.Principal.SecurityIdentifier]).Value
 if ($vladelec -ne 'S-1-5-32-544') { Say "ERROR folder owner: $vladelec"; $bad++ } else { Say "folder ${dir}: owner Administrators" }
+# 14.11 (audit): the folder holds scripts that run as SYSTEM - check the rights for real, not only the owner: inheritance
+# off and no write/modify for Users (S-1-5-32-545), Authenticated Users (S-1-5-11) or Everyone (S-1-1-0)
+$acl = Get-Acl -LiteralPath $dir
+$pisat = [Security.AccessControl.FileSystemRights]'WriteData, AppendData, WriteExtendedAttributes, DeleteSubdirectoriesAndFiles, WriteAttributes, Delete, ChangePermissions, TakeOwnership'
+$chuzhie = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | Where-Object {
+  $_.AccessControlType -eq 'Allow' -and @('S-1-5-32-545', 'S-1-5-11', 'S-1-1-0') -contains $_.IdentityReference.Value -and
+  ($_.FileSystemRights -band $pisat) -ne 0 })
+if (-not $acl.AreAccessRulesProtected) { Say "ERROR folder ${dir}: rights still inherited from ProgramData"; $bad++ }
+elseif ($chuzhie.Count) { Say "ERROR folder ${dir}: non-admins can write ($($chuzhie.Count) rules)"; $bad++ }
+else { Say "folder ${dir}: only SYSTEM and Administrators can write" }
 
 # --- 2. scripts
 foreach ($pair in @(@{s = $srcGpu; d = $dstGpu }, @{s = $srcZvuk; d = $dstZvuk })) {

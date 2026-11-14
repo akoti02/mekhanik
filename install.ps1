@@ -203,9 +203,16 @@ $task = Get-ScheduledTask -TaskName 'Mekhanik' -ErrorAction SilentlyContinue
 # 13.11 fix: the task of 0.5.x (no "--zapusk", default priority 7 = below normal) is replaced by the new one; a task
 # that already runs the supervisor is left as is (the program updates itself)
 $staraya = $task -and (-not (@($task.Actions | Where-Object { $_.Arguments -match '--zapusk' }).Count) -or $task.Settings.Priority -ne 4)
+# 14.11 (audit): a throw anywhere after the task was held disabled must not leave it disabled
+trap { try { Enable-ScheduledTask -TaskName 'Mekhanik' -ErrorAction SilentlyContinue | Out-Null } catch {}; break }
 if (-not $task -or $staraya) {
     try { Register-ScheduledTask -TaskName 'Mekhanik' -Xml $taskXml -Force -ErrorAction Stop | Out-Null; Write-Host "task Mekhanik $(if ($staraya) { 're-registered (was 0.5: no --zapusk or priority not 4)' } else { 'registered' }) (at logon, priority 4, --zapusk)" }
-    catch { Write-Host "TASK NOT REGISTERED: $($_.Exception.Message)"; exit 1 }
+    catch {
+        Write-Host "TASK NOT REGISTERED: $($_.Exception.Message)"
+        # 14.11 (audit): give the old task back its start at logon rather than leave it disabled
+        try { Enable-ScheduledTask -TaskName 'Mekhanik' -ErrorAction SilentlyContinue | Out-Null } catch {}
+        exit 1
+    }
 } else { Write-Host 'task Mekhanik already runs the supervisor - left as is (the program updates itself)' }
 try { Enable-ScheduledTask -TaskName 'Mekhanik' -ErrorAction Stop | Out-Null } catch {}
 

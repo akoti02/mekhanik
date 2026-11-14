@@ -45,12 +45,18 @@ function Zamer {
   }
   $p = Get-Process -Name audiodg -ErrorAction SilentlyContinue | Select-Object -First 1
   if (-not $p) { return @{ deskriptory = 0; potoki = 0; cpu = 0.0; est = $false } }
-  $c1 = $p.TotalProcessorTime
-  if (-not $Suho) { Start-Sleep -Milliseconds 1000 }
-  try { $p.Refresh() } catch {}
-  $c2 = $p.TotalProcessorTime
-  $cpu = (($c2 - $c1).TotalMilliseconds / (1000.0 * [Environment]::ProcessorCount)) * 100.0
-  @{ deskriptory = [int]$p.HandleCount; potoki = [int]$p.Threads.Count; cpu = [math]::Round($cpu, 1); est = $true }
+  # 14.11 (audit): audiodg can exit (Windows recycles it on device changes) during the 1 s sample - then the reads
+  # below throw; answer 'no audiodg' instead of dying without a result file
+  try {
+    $c1 = $p.TotalProcessorTime
+    if (-not $Suho) { Start-Sleep -Milliseconds 1000 }
+    $p.Refresh()
+    $c2 = $p.TotalProcessorTime
+    $cpu = (($c2 - $c1).TotalMilliseconds / (1000.0 * [Environment]::ProcessorCount)) * 100.0
+    @{ deskriptory = [int]$p.HandleCount; potoki = [int]$p.Threads.Count; cpu = [math]::Round($cpu, 1); est = $true }
+  } catch {
+    @{ deskriptory = 0; potoki = 0; cpu = 0.0; est = $false }
+  }
 }
 
 # a real leak worth a restart: clearly abnormal counts
