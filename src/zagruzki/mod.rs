@@ -311,12 +311,23 @@ fn вид_файла(путь: &Path) -> (Вид, Option<String>) {
             return (Вид::Интернет, м.сайт());
         }
     }
-    // папка-проект?
+    // папка-проект? 🟥 14.11 (аудит): ответ по папке помним 10 с — догонялка при старте читала папку заново на
+    // КАЖДЫЙ файл без метки (квадрат на N файлах)
     if let Some(папка) = путь.parent() {
-        let имена: Vec<String> = std::fs::read_dir(папка)
-            .map(|д| д.filter_map(Result::ok).filter_map(|з| з.file_name().into_string().ok()).collect())
-            .unwrap_or_default();
-        if papki::похоже_на_проект(&имена) {
+        static ПАПКИ: std::sync::Mutex<Option<(PathBuf, std::time::Instant, bool)>> = std::sync::Mutex::new(None);
+        let mut п = ПАПКИ.lock().unwrap_or_else(|о| о.into_inner());
+        let проект = match &*п {
+            Some((было, когда, ответ)) if было == папка && когда.elapsed() < Duration::from_secs(10) => *ответ,
+            _ => {
+                let имена: Vec<String> = std::fs::read_dir(папка)
+                    .map(|д| д.filter_map(Result::ok).filter_map(|з| з.file_name().into_string().ok()).collect())
+                    .unwrap_or_default();
+                let ответ = papki::похоже_на_проект(&имена);
+                *п = Some((папка.to_path_buf(), std::time::Instant::now(), ответ));
+                ответ
+            }
+        };
+        if проект {
             return (Вид::Работа, None);
         }
     }
@@ -379,9 +390,10 @@ fn обработать(путь: &Path, отпечатки: &mut karantin::От
             }
         }
         Итог::Чисто => {
+            // 🟥 14.11 (аудит): на диск — пачкой из цикла `работать` (было: чтение и запись всего файла отпечатков на
+            // КАЖДЫЙ чистый файл); проба на стенде живой файл отпечатков не трогает вовсе
             if let Some(о) = &отпечаток {
-                отпечатки.чистые.insert(о.clone());
-                let _ = отпечатки.сохранить();
+                if !тихо { отпечатки.чистые.insert(о.clone()); }
             }
         }
         _ => {}
@@ -416,7 +428,8 @@ fn записать_итог(
         "otpechatok": отпечаток,
         "karantin_id": карантин_id,
     });
-    записать_историю(тело.clone());
+    // 🟥 14.11 (аудит): проба на стенде — не в историю окна (её видит он сам), только свой журнал
+    if !тихо { записать_историю(тело.clone()); }
     // в журнал: проба — только свой журнал; опасное/придержанное — и БАРСу
     if тихо {
         crate::svyaz::журнал("загрузка_проверена_проба", &тело);
@@ -460,18 +473,37 @@ pub fn работать() {
         обойти(корень, &пер);
     }
 
+    // 🟥 14.11 (аудит): новые чистые отпечатки — на диск пачкой: в простое (нет событий 2 с), раз в 5 с и при выходе
+    let mut не_сохранено_с: Option<std::time::Instant> = None;
     loop {
         if crate::svyaz::просят_выйти() {
+            if не_сохранено_с.is_some() { let _ = отпечатки.сохранить(); }
             стоп.store(true, Ordering::Relaxed);
             return;
         }
-        match прм.recv_timeout(Duration::from_secs(2)) {
+        if не_сохранено_с.is_some_and(|т| т.elapsed() >= Duration::from_secs(5)) {
+            let _ = отпечатки.сохранить();
+            не_сохранено_с = None;
+        }
+        let событие = прм.recv_timeout(Duration::from_secs(2));
+        if событие.is_err() && не_сохранено_с.is_some() {
+            let _ = отпечатки.сохранить();
+            не_сохранено_с = None;
+        }
+        match событие {
             Ok(sledit::Событие::Файл(путь)) => {
+                let было = отпечатки.чистые.len();
                 let _ = обработать(&путь, &mut отпечатки, exe_защитника.as_deref(), тихо);
+                if отпечатки.чистые.len() != было && не_сохранено_с.is_none() {
+                    не_сохранено_с = Some(std::time::Instant::now());
+                }
             }
             Ok(sledit::Событие::ОбойтиЗаново(корень)) => обойти(&корень, &пер),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                if не_сохранено_с.is_some() { let _ = отпечатки.сохранить(); }
+                return;
+            }
         }
     }
 }

@@ -69,8 +69,10 @@ pub fn ждать_докачки(путь: &Path, тихо: Duration, преде
     let начало = Instant::now();
     let mut прежний: Option<(u64, std::time::SystemTime)> = None;
     let mut устойчиво = Instant::now();
+    let mut давний = false;
     loop {
-        if начало.elapsed() > предел {
+        // 🟥 14.11 (аудит): просят выйти — не держать выход до 10 мин ради одного файла
+        if начало.elapsed() > предел || crate::svyaz::просят_выйти() {
             return false;
         }
         if let Some(имя) = путь.file_name().and_then(|и| и.to_str()) {
@@ -83,8 +85,14 @@ pub fn ждать_докачки(путь: &Path, тихо: Duration, преде
             Err(_) => return false, // пропал посреди ожидания
             Ok(м) => {
                 let текущий = (м.len(), м.modified().unwrap_or(std::time::UNIX_EPOCH));
+                // 🟥 14.11 (аудит): файл не менялся дольше `тихо` ещё до первого взгляда (лежал до запуска) — хватит одного
+                // повторного взгляда через 0,4 с, что размер тот же (время изменения у пишущегося файла может обновиться
+                // лишь при закрытии); раньше каждый такой ждал 2 с, один за другим, и догонялка при старте шла N×2 с
+                if прежний.is_none() {
+                    давний = текущий.1.elapsed().is_ok_and(|д| д >= тихо + Duration::from_secs(1));
+                }
                 if Some(текущий) == прежний {
-                    if устойчиво.elapsed() >= тихо {
+                    if давний || устойчиво.elapsed() >= тихо {
                         return true;
                     }
                 } else {
@@ -169,6 +177,22 @@ fn следить_за(корень: PathBuf, передатчик: Sender<Со�
 #[cfg(test)]
 mod тесты {
     use super::*;
+
+    /// 🟥 14.11 (аудит): файл, что лежит давно (не менялся час), — готов после одного повторного взгляда (≈0,4 с), а не
+    /// после полного «тихо» (2 с на файл, один за другим — догонялка при старте шла N×2 с).
+    #[test]
+    fn давний_файл_без_долгого_ожидания() {
+        let врем = std::env::temp_dir().join(format!("mekh-sledit-davniy-{}", std::process::id()));
+        std::fs::create_dir_all(&врем).unwrap();
+        let файл = врем.join("давно.bin");
+        std::fs::write(&файл, b"old bytes").unwrap();
+        std::fs::File::options().write(true).open(&файл).unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(3600)).unwrap();
+        let т = Instant::now();
+        assert!(ждать_докачки(&файл, Duration::from_secs(2), Duration::from_secs(10)));
+        assert!(т.elapsed() < Duration::from_millis(1500), "давний файл ждали {:?}", т.elapsed());
+        let _ = std::fs::remove_dir_all(&врем);
+    }
 
     #[test]
     fn разбор_одного_события() {

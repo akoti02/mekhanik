@@ -236,13 +236,35 @@ pub fn события_выключения() -> Vec<(u32, u64)> {
     use std::process::Command;
     // XPath: три источника; последние сутки
     let запрос = "*[System[(EventID=41 or EventID=6008 or EventID=1001) and TimeCreated[timediff(@SystemTime) <= 86400000]]]";
-    let вывод = Command::new("wevtutil")
-        .args(["qe", "System", "/q:", "/rd:true", "/f:text", "/c:20"])
-        .arg(format!("/q:{запрос}"))
-        .output();
+    let вывод = Command::new("wevtutil").args(аргументы_wevtutil(запрос)).output();
     let Ok(вывод) = вывод else { return Vec::new(); };
     let текст = String::from_utf8_lossy(&вывод.stdout);
-    разобрать_wevtutil(&текст)
+    разобрать_wevtutil_xml(&текст)
+}
+
+/// 🟥 ЧИСТАЯ (видно в тесте), 14.11 (аудит, живьём): аргументы `wevtutil` — ключ `/q:` ОДИН раз. До 14.11 в списке был
+/// ещё пустой `/q:`, и `wevtutil` отвечал «Invalid option q. Option is specified more than once» (код 87): разбор
+/// внезапных выключений не работал ни разу. Вид — XML: подписи в тексте на языке Windows, а время — как настроено.
+pub fn аргументы_wevtutil(запрос: &str) -> Vec<String> {
+    ["qe", "System", "/rd:true", "/f:xml", "/c:20"].iter().map(|с| с.to_string())
+        .chain(std::iter::once(format!("/q:{запрос}"))).collect()
+}
+
+/// 🟥 ЧИСТАЯ (видно в тесте), 14.11 (аудит): разобрать вывод `wevtutil qe … /f:xml` — `<EventID …>N</EventID>` и
+/// `<TimeCreated SystemTime='…Z'/>`: не зависят от языка Windows и всегда в UTC.
+pub fn разобрать_wevtutil_xml(текст: &str) -> Vec<(u32, u64)> {
+    let mut в = Vec::new();
+    for кусок in текст.split("<Event ").skip(1) {
+        let id = кусок.split_once("<EventID").and_then(|(_, х)| х.split_once('>')).and_then(|(_, х)| х.split_once('<'))
+            .and_then(|(ч, _)| ч.trim().parse::<u32>().ok());
+        let когда = кусок.split_once("SystemTime=").and_then(|(_, х)| {
+            let кав = х.chars().next()?;
+            let х = &х[кав.len_utf8()..];
+            х.split_once(кав).map(|(т, _)| т)
+        }).and_then(разобрать_дату);
+        if let (Some(i), Some(мс)) = (id, когда) { в.push((i, мс)); }
+    }
+    в
 }
 
 #[cfg(not(windows))]
@@ -371,6 +393,25 @@ mod тесты {
         // чистого выхода (нет подходящих событий) — падения нет
         assert!(разобрать_падение(&папка, || vec![]).unwrap().is_none());
         let _ = std::fs::remove_dir_all(&папка);
+    }
+
+    /// 🟥 14.11 (аудит, живьём): `/q:` — один раз (двойной давал код 87 и пустой вывод: разбор падений не работал
+    /// ни разу); вид XML разбирается по <EventID> и SystemTime в UTC (образец — живое событие 6008 этого ПК).
+    #[test]
+    fn wevtutil_один_ключ_и_xml() {
+        let а = аргументы_wevtutil("*[System[(EventID=41)]]");
+        assert_eq!(а.iter().filter(|x| x.starts_with("/q:")).count(), 1, "ключ /q: — один раз: {а:?}");
+        assert!(а.contains(&"/f:xml".to_string()));
+        let xml = "<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'><System><Provider Name='EventLog'/>\
+<EventID Qualifiers='32768'>6008</EventID><Version>0</Version><Level>2</Level>\
+<TimeCreated SystemTime='2026-11-12T17:03:06.2497529Z'/><EventRecordID>125959</EventRecordID></System></Event>\
+<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'><System><EventID>41</EventID>\
+<TimeCreated SystemTime=\"2026-11-12T17:02:00.0000000Z\"/></System></Event>";
+        let в = разобрать_wevtutil_xml(xml);
+        assert_eq!(в.len(), 2, "{в:?}");
+        assert_eq!(в[0].0, 6008);
+        assert_eq!(в[0].1, chrono::DateTime::parse_from_rfc3339("2026-11-12T17:03:06.2497529Z").unwrap().timestamp_millis() as u64);
+        assert_eq!(в[1], (41, chrono::DateTime::parse_from_rfc3339("2026-11-12T17:02:00Z").unwrap().timestamp_millis() as u64));
     }
 
     #[test]

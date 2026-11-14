@@ -263,7 +263,17 @@ impl Уведомление {
 /// Положить в очередь (окна нет). Очередь полна — не кладём: уведомления не копятся без конца.
 pub fn в_очередь(папка: &Path, у: &Уведомление, номер: u64) -> bool {
     let п = папка.join(УВЕДОМЛЕНИЯ);
-    let есть = std::fs::read_dir(&п).map(|д| д.filter_map(Result::ok).count()).unwrap_or(0);
+    // 🟥 14.11 (аудит): считать только уведомления (*.json) — недописанные `.tmp-okno` после сбоя занимали места
+    // в очереди навсегда, и при 30 таких очередь молча отказывала (и тревоге о карантине тоже); их — подмести
+    let есть = std::fs::read_dir(&п).map(|д| д.filter_map(Result::ok).filter(|ф| {
+        let путь = ф.path();
+        if путь.extension().is_some_and(|р| р == "tmp-okno") {
+            if ф.metadata().ok().and_then(|м| м.modified().ok()).and_then(|в| в.elapsed().ok())
+                .is_some_and(|д| д > std::time::Duration::from_secs(60)) { let _ = std::fs::remove_file(&путь); }
+            return false;
+        }
+        путь.extension().is_some_and(|р| р == "json")
+    }).count()).unwrap_or(0);
     if есть >= УВЕДОМЛЕНИЙ_МАКС { return false; }
     записать(&п.join(format!("{}-{номер}.json", у.мс)), &у.в_json().to_string()).is_ok()
 }
@@ -640,7 +650,7 @@ pub fn случаи(события: &[Событие]) -> Vec<Случай> {
                 let кого = str_(д, "кого").unwrap_or_default();
                 итог[н].сделано.push(if кого.is_empty() { ступень } else { format!("{ступень}: {кого}") });
                 if let Some(к) = д.get("подробно").and_then(|п| п.get("кого")).and_then(Value::as_array) {
-                    итог[н].кому.extend(к.iter().filter_map(|x| x.as_str().map(str::to_string)));
+                    итог[н].кому.extend(к.iter().filter_map(|x| x.as_str().map(str::to_string)).filter(|к| !к.is_empty()));
                 } else if !кого.is_empty() { итог[н].кому.push(кого); }
                 if итог[н].признаки.is_empty() { if let Some(к) = str_(д, "класс") { итог[н].признаки.push(к); } }
                 итог[н].исход = Исход::Идёт;
@@ -687,7 +697,9 @@ pub fn случаи(события: &[Событие]) -> Vec<Случай> {
                 let кому = str_(д, "кому").unwrap_or_default();
                 let почему = str_(д, "почему").unwrap_or_default();
                 let к_случаю = итог.iter().rposition(|сл| с.мс.saturating_sub(сл.начало_мс) <= ВЕРНУЛ_К_СЛУЧАЮ_МС
-                    && сл.кому.iter().any(|к| к.eq_ignore_ascii_case(&кому) || кому.contains(к.as_str())));
+                    // 🟥 14.11 (аудит): пустое «кому» в случае ловило бы ЛЮБОЙ возврат («...».contains("") — всегда да)
+                    && сл.кому.iter().filter(|к| !к.is_empty())
+                        .any(|к| к.eq_ignore_ascii_case(&кому) || кому.contains(к.as_str())));
                 if let Some(н) = к_случаю { итог[н].вернул.push((с.мс, format!("{кому} — {почему}"))); }
             }
             _ => {}
