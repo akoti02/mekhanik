@@ -33,7 +33,7 @@ pub mod pasport;
 pub mod profili;
 pub mod win;
 
-pub use klassy::{Решение, Род, ЧастьБарса, Чей};
+pub use klassy::{Защита, Решение, Род, ЧастьБарса, Чей};
 pub use pasport::Личность;
 
 use std::collections::{HashMap, HashSet};
