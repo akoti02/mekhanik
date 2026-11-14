@@ -1,17 +1,17 @@
 # Mekhanik - INSTALL THE HELPER WITH SYSTEM RIGHTS (13.11.2026, wave 2a package "zhizn"). ASCII only.
 # ONE admin command, idempotent (asks Windows itself for rights). Mekhanik itself runs WITHOUT admin; only this tiny
-# helper has system rights, and it does three small, fixed things - it does NOT update itself (only this command does):
+# helper has system rights, and it does two small, fixed things - it does NOT update itself (only this command does):
 #   1) task Mekhanik-Videokarta on event 4201: GPU power clamp healing (zazhim-lechit.ps1) - already stood since 13.11,
 #      this command does not break it;
 #   2) task Mekhanik-Zvuk on event 4202: restart the audio service on a real audiodg leak, ONLY when nothing plays
-#      (zvuk-lechit.ps1 checks by itself + rate limit);
-#   3) firewall rule "mekhanik.exe may not go out" (everything except 127.0.0.0/8 and ::1 - the loopback remote to the
-#      PC copy must live). A second lock over the code's own offline guards.
+#      (zvuk-lechit.ps1 checks by itself + rate limit).
+#   (14.11: the firewall rule is gone - it matched only the launcher stub by path, never the brain in versii\<ver>\;
+#    an old rule from an earlier install is removed by this command.)
 # Each event is only a reason; each script measures the need itself and limits its own rate.
 #
 #   powershell -ExecutionPolicy Bypass -File pomoshchnik\ustanovit.ps1            # install / update the helper (admin)
 #   powershell -ExecutionPolicy Bypass -File pomoshchnik\ustanovit.ps1 -Snyat     # remove the helper (admin)
-#   powershell -ExecutionPolicy Bypass -File pomoshchnik\ustanovit.ps1 -Suho      # DRY RUN: no admin, registers/firewalls
+#   powershell -ExecutionPolicy Bypass -File pomoshchnik\ustanovit.ps1 -Suho      # DRY RUN: no admin, registers
 #                                                                                 #   NOTHING, prints what would be done
 #   -BezProby : skip the extra live nvpcf restart probe (b)
 param([switch]$BezProby, [switch]$Snyat, [switch]$Suho, [string]$UserLocalAppData = '', [string]$SuhoDir = '')
@@ -32,7 +32,6 @@ $metkaZvuk = Join-Path $dir 'zvuk.json'
 $itogGpu = Join-Path $dir 'zazhim_itog.json'
 # the user profile, captured before elevation (admin profile is a different one)
 if (-not $UserLocalAppData) { $UserLocalAppData = $env:LOCALAPPDATA }
-$mekhExe = Join-Path $UserLocalAppData 'Programs\Mekhanik\mekhanik.exe'
 
 function Parses([string]$path) {
   if (-not (Test-Path -LiteralPath $path)) { return $false }
@@ -69,7 +68,7 @@ function Task-Xml([string]$imya, [int]$sobytie, [string]$skript) {
 # ===== DRY RUN: no admin, change nothing =====
 if ($Suho) {
   if (-not $SuhoDir) { $SuhoDir = Join-Path $env:TEMP ('mekhanik-pom-suho-' + [guid]::NewGuid().ToString('N').Substring(0, 8)) }
-  Write-Output "=== DRY RUN (-Suho): no admin, registers/firewalls NOTHING. Temp folder $SuhoDir ==="
+  Write-Output "=== DRY RUN (-Suho): no admin, registers NOTHING. Temp folder $SuhoDir ==="
   $bad = 0
   foreach ($s in @($srcGpu, $srcZvuk)) {
     if (Parses $s) { Write-Output "ok   script parses and is ASCII: $(Split-Path $s -Leaf)" }
@@ -80,7 +79,7 @@ if ($Suho) {
     catch { Write-Output "BAD  task XML for $($t.n) does not parse: $_"; $bad++ }
   }
   Write-Output "---  would run GPU clamp probe (a): write event $sobGpu, expect the task to answer 'ne_nuzhno' (no clamp)"
-  Write-Output "---  would set firewall: BLOCK $($pravilaSeti -join ', ') for '$mekhExe' outbound+inbound, except 127.0.0.0/8 and ::1"
+  Write-Output "---  NO firewall rule (14.11): the brain runs from versii\<version>\ - a rule by path would miss it; offline is held by the code itself; old rules $($pravilaSeti -join ', ') would be removed if present"
   Write-Output "---  would copy scripts into $dir (owner Administrators; SYSTEM+Admins write, Users read)"
   # prove the dry run does the harmless file steps on a temp folder
   New-Item -ItemType Directory -Force $SuhoDir | Out-Null
@@ -175,17 +174,12 @@ foreach ($t in @(@{n = $zadachaGpu; e = $sobGpu; s = $dstGpu }, @{n = $zadachaZv
   } catch { Say "task $($t.n): missing"; $bad++ }
 }
 
-# --- 5. firewall: mekhanik.exe may not go out (except loopback to the PC copy)
-$naruzhu = @('0.0.0.0-126.255.255.255', '128.0.0.0-255.255.255.255', '::2-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff')
-foreach ($rr in @(@{n = 'Mekhanik-Oflayn-Out'; d = 'Outbound' }, @{n = 'Mekhanik-Oflayn-In'; d = 'Inbound' })) {
-  try {
-    if (Get-NetFirewallRule -Name $rr.n -ErrorAction SilentlyContinue) { Remove-NetFirewallRule -Name $rr.n -ErrorAction SilentlyContinue }
-    New-NetFirewallRule -Name $rr.n -DisplayName "Mekhanik: no network ($($rr.d.ToLower()))" -Direction $rr.d `
-      -Action Block -Program $mekhExe -RemoteAddress $naruzhu -Profile Any -ErrorAction Stop | Out-Null
-    Say "firewall rule $($rr.n): mekhanik.exe blocked $($rr.d) (except loopback)"
-  } catch { Say "ERROR firewall $($rr.n): $_"; $bad++ }
+# --- 5. NO firewall rule (14.11): the brain runs from versii\<version>\mekhanik.exe and the path changes with every
+# self-update - a rule by program path matched only the launcher stub, a false lock. Offline is held by the code itself
+# (no network APIs; it checks its own connections). Rules from an earlier install are removed.
+foreach ($r in $pravilaSeti) {
+  try { if (Get-NetFirewallRule -Name $r -ErrorAction SilentlyContinue) { Remove-NetFirewallRule -Name $r -ErrorAction Stop; Say "old firewall rule $r removed" } } catch { Say "firewall ${r}: $_" }
 }
-if (-not (Test-Path -LiteralPath $mekhExe)) { Say "note: $mekhExe not installed yet - the rule matches by path, it will apply once install.ps1 puts the exe there" }
 
 # --- 6. marks for Mekhanik
 try { ([ordered]@{ versiya = 1; zadacha = $zadachaGpu; sobytie = $sobGpu; skript = $dstGpu; ustanovleno = (Get-Date).ToString('o') } | ConvertTo-Json -Compress) | Set-Content -LiteralPath $metka -Encoding ascii -ErrorAction Stop; Say "mark: $metka" } catch { Say "ERROR mark: $_"; $bad++ }
@@ -214,5 +208,5 @@ if (-not $BezProby -and -not $bad) {
   Say 'probe (b): one restart of NVIDIA Platform Controllers and Framework (no clamp)'
   & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $dstGpu -Proba | ForEach-Object { Say ('  ' + $_) }
 }
-if ($bad) { Say "=== DONE WITH ERRORS: $bad ===" } else { Say '=== DONE: helper installed (GPU clamp 4201, audio 4202, firewall) ===' }
+if ($bad) { Say "=== DONE WITH ERRORS: $bad ===" } else { Say '=== DONE: helper installed (GPU clamp 4201, audio 4202) ===' }
 Start-Sleep -Seconds 15
