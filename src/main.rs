@@ -17,30 +17,9 @@
 
 use serde_json::json;
 
-// 🟥 13.11 (волна 2б, ключ arbitr): распорядитель железа по таблице положений (tablica/rychagi/most). Потоки/вызовы
-// подключит сведение — пока только объявление, чтобы пакет собирался и прогонялись тесты.
-mod arbitr;
-mod kopiya;
-mod kto;
-mod lechenie;
-mod obnovlenie;
-mod okna;
-mod okno_mozg;
-// 🟥 13.11 (волна 2б, ключ predvidenie): предвидение (поводы, прогноз, советы до пика) и чёрный ящик. Свод кормит
-// `Предвидение::шаг` входом из kto/vnimanie/svyaz, исполняет советы лечением, пишет quiet_until в barsu.json.
-mod predvidenie;
-mod yashchik;
-// 🟥 13.11 (волна 2а, ключ vnimanie): шина событий и карта внимания. Потоки окна событий (`sobytiya_win::запустить`)
-// и снятие внимания (`vnimanie::снять`) Мозг заводит при старте.
-mod sobytiya;
-mod sobytiya_win;
-mod storozh;
-mod svyaz; // внутри себя подключает zhurnal и kartina_barsa через #[path] — отдельно их не объявлять (один поток записи)
-mod vid;
-mod videokarta;
-mod vnimanie;
-mod zagruzki;
-mod zhizn;
+// 🟥 14.11: модули пакета живут в библиотеке (`lib.rs`), чтобы стенды из `examples` мерили те же куски. Голова и роли —
+// здесь; берём из библиотеки то, что зовёт `main` (остальное зовут друг друга внутри библиотеки).
+use mekhanik::{obnovlenie, okna, storozh, svyaz, vid, videokarta, zagruzki, zhizn};
 
 fn main() {
     let роль = std::env::args().nth(1);
