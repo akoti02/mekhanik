@@ -19,6 +19,7 @@ extern "system" {
     fn GetLastError() -> u32;
     fn OpenProcess(доступ: u32, наследовать: i32, pid: u32) -> isize;
     fn TerminateProcess(h: isize, код: u32) -> i32;
+    fn WaitForSingleObject(h: isize, мс: u32) -> u32;
 }
 
 /// 🟥 ЧИСТАЯ (видно в тесте): окно прежней версии — процесс «Механика» из ДРУГОЙ папки `versii\<версия>\` (не мой exe и
@@ -40,10 +41,13 @@ pub fn сменить_старое_окно() {
         if pid == я || !имя.eq_ignore_ascii_case("mekhanik.exe") { continue; }
         let Some(путь) = crate::okna::путь_процесса(pid) else { continue };
         if !окно_прежней_версии(&путь, &мой) { continue; }
-        // PROCESS_TERMINATE = 0x0001
-        let h = unsafe { OpenProcess(0x0001, 0, pid) };
+        // PROCESS_TERMINATE = 0x0001, SYNCHRONIZE = 0x0010_0000 (дождаться выхода)
+        let h = unsafe { OpenProcess(0x0001 | 0x0010_0000, 0, pid) };
         if h == 0 { continue; }
         let ок = unsafe { TerminateProcess(h, 0) } != 0;
+        // 🟥 14.11 (живьём: новое окно поднялось лишь через 30 с): закрытие не мгновенно — мьютекс окна ещё держался,
+        // и `поднять_окно` сразу после считало окно живым. Ждём выхода до 3 с.
+        if ок { unsafe { WaitForSingleObject(h, 3000) }; }
         unsafe { CloseHandle(h) };
         crate::svyaz::журнал("механик_окно_прежней_версии_закрыто", &json!({ "pid": pid, "путь": путь, "закрыто": ок }));
     }

@@ -92,10 +92,15 @@ if ($Suho) {
     $target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $src 'target' }
     if ($queue) {
         Write-Host "=== building mekhanik $ver through the PC build queue ==="
+        # 14.11: the queue runs cargo in the current folder - run it from the sources (started elsewhere it found no
+        # Cargo.toml and reported "TESTS FAILED")
+        Push-Location $src
         & $queue test -j 4 '--' --test-threads=2
-        if ($LASTEXITCODE -ne 0) { Write-Host 'TESTS FAILED - no release'; exit 1 }
+        if ($LASTEXITCODE -ne 0) { Pop-Location; Write-Host 'TESTS FAILED - no release'; exit 1 }
         & $queue build --release -j 4
-        if ($LASTEXITCODE -ne 0) { Write-Host 'BUILD FAILED'; exit 1 }
+        $rc = $LASTEXITCODE
+        Pop-Location
+        if ($rc -ne 0) { Write-Host 'BUILD FAILED'; exit 1 }
     } else {
         Write-Host "=== building mekhanik $ver (direct cargo, low priority) ==="
         Push-Location $src
