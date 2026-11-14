@@ -81,6 +81,12 @@
      "when": [{"path": ["*\\appdata\\local\\programs\\bars\\*"]}]},
     {"kind": "unknown", "label": "БАРС", "owner": "bars", "bars": "other",
      "when": [{"path": ["*\\appdata\\local\\bars\\*"]}]},
+    {"kind": "unknown", "label": "БАРС — служебный процесс", "owner": "bars", "bars": "other",
+     "when": [{"file": ["powershell.exe", "pwsh.exe", "python.exe", "pythonw.exe", "node.exe", "cmd.exe"],
+       "cmd": ["*\\dev\\overseer\\scripts\\*", "*\\dev\\overseer\\app\\dist*"]}]},
+    {"kind": "utility", "label": "Wispr — хранитель микрофона", "guard": "periphery",
+     "when": [{"file": ["powershell.exe", "pwsh.exe"], "cmd": ["*\\wispr-watchdog\\*"]}]},
+    {"kind": "utility", "label": "мост телефона (adb)", "guard": "periphery", "when": [{"file": ["adb.exe"]}]},
 
     {"kind": "claude", "label": "Claude", "owner": "work", "when": [{"file": ["claude.exe"]}]},
 

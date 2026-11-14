@@ -864,6 +864,29 @@ mod тесты {
 
     /// 🟥 Красный на старом коде: `storozh::СБОРКИ` считал сборкой любой java.exe (на краю памяти замерла бы любая его
     /// Java-программа). Теперь java — сборка только со строкой демона Gradle или Kotlin, и морозить его нельзя.
+    /// 🟥 14.11 (живьём под рычагами в 11:48 — экономный режим): хранитель микрофона его диктовки Wispr, сервер экрана
+    /// БАРСа (`http.server … overseer\app\dist`), сторож Shizuku БАРСа и мост телефона adb числились фоном.
+    #[test]
+    fn служебные_барса_wispr_и_adb_не_фон() {
+        let с = спр();
+        let пш = Сверка::новая("powershell.exe", Some(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"),
+            None, None, None);
+        let строка = с.строка_совпала(r#""C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "C:\dev\tools\wispr-watchdog\mic-keeper.ps1""#);
+        let (н, _) = с.найти(&пш, &строка).expect("хранитель микрофона Wispr узнан");
+        assert_eq!(с.записи[н].защита, Some(Защита::Периферия), "ввод (диктовка) — не трогать");
+        let строка = с.строка_совпала(r#""C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -WindowStyle Hidden -File "C:\dev\overseer\scripts\shizuku-storozh.ps1""#);
+        let (н, _) = с.найти(&пш, &строка).expect("сторож Shizuku БАРСа узнан");
+        assert_eq!(с.записи[н].барс, Some(ЧастьБарса::Прочее));
+        let пи = Сверка::новая("python.exe", Some(r"C:\Python312\python.exe"), None, None, None);
+        let строка = с.строка_совпала(r#""python" -m http.server 1430 --directory C:\dev\overseer\app\dist --bind 127.0.0.1"#);
+        let (н, _) = с.найти(&пи, &строка).expect("сервер экрана БАРСа узнан");
+        assert_eq!(с.записи[н].барс, Some(ЧастьБарса::Прочее));
+        let adb = Сверка::новая("adb.exe", None, None, None, None);
+        assert_eq!(с.записи[с.найти(&adb, &[]).expect("adb узнан").0].защита, Some(Защита::Периферия));
+        // простой PowerShell без этих строк — не задет (обёртка: род того, кто запустил)
+        assert!(с.найти(&пш, &с.строка_совпала("powershell.exe -NoProfile -Command Get-Date")).is_none());
+    }
+
     #[test]
     fn java_без_gradle_не_сборка() {
         let с = спр();
